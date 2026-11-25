@@ -1,0 +1,29 @@
+:root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+body { margin: 0; background: #1e1e1e; color: #eee; }
+body.app-fullscreen main { position: fixed; inset: 0; z-index: 50; background: #1e1e1e; }
+main { padding: 12px 16px; }
+.topbar { display: flex; gap: 16px; align-items: center; }
+.topbar h1 { font-size: 20px; margin: 0; }
+button { cursor: pointer; padding: 6px 12px; margin: 2px; }
+input, select { padding: 6px; margin: 2px; }
+.muted { color: #aaa; font-size: 13px; }
+.warn { color: #ffb454; }
+.status { background: #333; padding: 8px; border-radius: 6px; }
+.book-list { list-style: none; padding: 0; }
+.book-row { display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; border-bottom: 1px solid #333; }
+.reader-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.spread { display: flex; justify-content: center; gap: 0; margin: 12px auto; max-width: 1200px; position: relative; min-height: 70vh; }
+.page-slot { flex: 1; max-width: 600px; background: #f5efe0; color: #111; overflow: hidden; position: relative; }
+.page-face img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.page-face { width: 100%; height: 100%; }
+.page-blank { background: #f5efe0; }
+.epub-page { padding: 24px 32px; line-height: 1.7; font-size: 17px; }
+.epub-page img { max-width: 100%; }
+.curl-leaf { position: absolute; inset: 0; pointer-events: none; transform-style: preserve-3d; }
+.leaf-front, .leaf-back { position: absolute; inset: 0; backface-visibility: hidden; background: #f5efe0; box-shadow: 0 0 24px rgba(0,0,0,.45); }
+.leaf-back { transform: rotateY(180deg); }
+.hint { color: #aaa; font-size: 13px; text-align: center; }
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; max-width: 700px; }
+.form-grid label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.telegram-panel { border-top: 1px solid #333; margin-top: 24px; padding-top: 8px; }
+.reader.is-fullscreen { position: fixed; inset: 0; z-index: 60; background: #111; padding: 8px; }
