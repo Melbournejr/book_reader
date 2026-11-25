@@ -18,7 +18,9 @@ mod db;
 mod epub;
 mod history;
 
-use history::{Bookmark, HistoryEntry, HistorySave};
+use history::{
+    Bookmark, BookmarkOut, Highlight, HighlightNew, HistoryEntry, HistorySave,
+};
 
 // ---------- types ----------
 
@@ -278,6 +280,52 @@ fn history_bookmark(state: State<AppState>, b: Bookmark) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn bookmarks_list(state: State<AppState>, book_id: String) -> Result<Vec<BookmarkOut>, String> {
+    let p = state.db_path.lock().unwrap().clone();
+    history::list_bookmarks(&p, &book_id)
+}
+
+#[tauri::command]
+fn bookmark_delete(state: State<AppState>, id: i64) -> Result<(), String> {
+    let p = state.db_path.lock().unwrap().clone();
+    history::delete_bookmark(&p, id)
+}
+
+#[tauri::command]
+fn highlight_add(state: State<AppState>, h: HighlightNew) -> Result<i64, String> {
+    let p = state.db_path.lock().unwrap().clone();
+    history::add_highlight(&p, h)
+}
+
+#[tauri::command]
+fn highlights_list(state: State<AppState>, book_id: String) -> Result<Vec<Highlight>, String> {
+    let p = state.db_path.lock().unwrap().clone();
+    history::list_highlights(&p, &book_id)
+}
+
+#[tauri::command]
+fn highlight_delete(state: State<AppState>, id: i64) -> Result<(), String> {
+    let p = state.db_path.lock().unwrap().clone();
+    history::delete_highlight(&p, id)
+}
+
+#[tauri::command]
+fn history_settings_get(state: State<AppState>, book_id: String) -> Result<Option<String>, String> {
+    let p = state.db_path.lock().unwrap().clone();
+    history::load_settings(&p, &book_id)
+}
+
+#[tauri::command]
+fn history_settings_save(
+    state: State<AppState>,
+    book_id: String,
+    settings: String,
+) -> Result<(), String> {
+    let p = state.db_path.lock().unwrap().clone();
+    history::save_settings(&p, &book_id, &settings)
+}
+
+#[tauri::command]
 fn history_relink(
     state: State<AppState>,
     old_id: String,
@@ -323,6 +371,13 @@ fn main() {
             history_list,
             history_save,
             history_bookmark,
+            bookmarks_list,
+            bookmark_delete,
+            highlight_add,
+            highlights_list,
+            highlight_delete,
+            history_settings_get,
+            history_settings_save,
             history_relink,
             history_delete
         ])

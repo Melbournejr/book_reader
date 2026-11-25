@@ -29,9 +29,27 @@ pub fn init(path: &Path) -> Result<(), String> {
             note TEXT,
             created_at INTEGER NOT NULL
         );
-        CREATE INDEX IF NOT EXISTS idx_history_last_read ON history(last_read DESC);",
+        CREATE TABLE IF NOT EXISTS highlights (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            book_id TEXT NOT NULL,
+            page INTEGER NOT NULL,       -- chỉ số chương/trang (EPUB/MOBI)
+            chapter TEXT,                -- tên chương lúc gạch, để hiển thị
+            color TEXT NOT NULL DEFAULT 'yellow',
+            text TEXT NOT NULL,          -- đoạn chữ đã gạch
+            note TEXT,                   -- ghi chú kèm theo (tùy chọn)
+            start_off INTEGER NOT NULL DEFAULT 0, -- vị trí bắt đầu trong text chương
+            end_off INTEGER NOT NULL DEFAULT 0,   -- vị trí kết thúc trong text chương
+            created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_history_last_read ON history(last_read DESC);
+        CREATE INDEX IF NOT EXISTS idx_bookmarks_book ON bookmarks(book_id);
+        CREATE INDEX IF NOT EXISTS idx_highlights_book ON highlights(book_id);
+",
     )
     .map_err(|e| e.to_string())?;
+    // Cột settings (JSON: zoom/fit/crop/2-trang...) thêm sau cho DB đã tạo
+    // từ bản trước — ALTER lỗi nếu cột đã có thì bỏ qua, không chặn app.
+    let _ = conn.execute("ALTER TABLE history ADD COLUMN settings TEXT", rusqlite::params![]);
     Ok(())
 }
 
