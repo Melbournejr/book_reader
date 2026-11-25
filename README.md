@@ -150,6 +150,52 @@ build. Bước đó chưa làm ở đây — làm sau khi bản đầu tiên bui
 - **Tra từ điển:** bôi đen chữ trong sách chữ → nút "📖 Tra từ" (hoặc nút 📖 Từ điển trên thanh công cụ, nhập tay). Tiếng Anh tra qua dictionaryapi.dev (miễn phí, không key, cần mạng): nghĩa + ví dụ + phiên âm. Từ tiếng Việt hoặc từ không có trong API thì có link mở Wiktionary tiếng Việt/Anh trên trình duyệt. Mất mạng/API lỗi thì báo rõ, không crash. Không kèm file từ điển offline.
 - **OPDS:** mục "OPDS — kéo sách từ server" trong thư viện: dán URL catalogue (Calibre/Kavita/Komga...), đăng nhập HTTP Basic nếu cần, duyệt mục, tìm kiếm nếu feed hỗ trợ (OpenSearch), tải sách về thư mục mày chọn rồi mở đọc như file local (không clone vào app). Hỗ trợ OPDS v1 (Atom XML) và v2 (JSON). Giới hạn: server nào không gửi CORS thì WebView không đọc được catalogue (app báo rõ); chỉ hỗ trợ auth HTTP Basic, không OAuth/token; không hỗ trợ mua sách có giá.
 
+### v0.2.0 — đại tu trình đọc (theo đánh giá 0.1/10 của Thiện)
+Thiện chấm bản 0.1.5 là 0.1/10: giao diện xấu, tính năng kể thì nhiều nhưng
+3 thứ cốt lõi hỏng — đọc toàn màn hình không thật, lật trang bị ngược tranh,
+không có đọc manga phải → trái. Bản này sửa cả 3 + làm lại giao diện.
+
+- **Đọc toàn màn hình "chìm" (F):** ẩn HẾT chrome — header của App, thanh
+  công cụ, bảng bên, thanh trượt — chỉ còn trang sách + thanh tiến độ mỏng
+  ở đáy + cụm nút nổi hình viên thuốc ở trên (hiện khi cử động chuột, tự
+  ẩn sau ~2.5s không cử động; menu đang mở thì không tự ẩn). Esc/F thoát.
+  Quan trọng: chế độ này do state React + CSS điều khiển, KHÔNG phụ thuộc
+  Fullscreen API — WebView chặn `requestFullscreen()` thì vẫn ẩn chrome
+  như thường (bản cũ chỉ thêm class `.is-fullscreen` nhưng giữ nguyên các
+  thanh công cụ nên đọc vẫn bị chiếm chỗ).
+- **Lật trang hết ngược (nguyên nhân thật):** bản 0.1.5 soi gương mặt sau
+  của lá 2 lần — vừa `scaleX(-1)` trong `renderFace(leafBack, mirrored=true)`
+  (Reader.tsx), vừa `.leaf-back { rotateY(180deg) }` trong CSS (mô hình card
+  3D chuẩn, phép xoay 180° này ĐÃ tự triệt tiêu soi gương). Kết quả: trang
+  đích hiện ngược trong suốt nửa sau của cú lật. Sửa: mặt sau render
+  `mirrored=false`. Đã chứng minh bằng test số học (`backFaceFactor` trong
+  `src/lib/spread.ts`, 90 test Node): bản cũ hệ số ngang ÂM ở mọi tư thế
+  nhìn thấy được, bản mới DƯƠNG (+1 đúng lúc lật xong). Kèm theo: lật 1
+  trang trước đây hiện sai trang (mặt sau lấy `target + 1` thay vì
+  `target`) — nay mặt sau luôn là đúng trang đích (xem `leafForFlip`).
+- **Đọc manga phải → trái (thật):** trước đây chỉ đảo chiều lật + phím mũi
+  tên, còn spread vẫn xếp trang trước bên trái — sai. Nay spread manga
+  xếp đúng: bìa (trang 1) đứng một mình bên phải, rồi (2,3), (4,5)... với
+  trang đọc trước nằm bên PHẢI, trang sau nằm bên TRÁI; lật tới thì lật
+  trang trái (trang vừa đọc xong), lui thì lật trang phải; phím mũi tên,
+  kéo chuột, thanh trượt, lưới trang (chảy phải → trái) đều theo chiều
+  manga. Nút bật/tắt nằm trong menu ⋯ của trình đọc, nhớ theo từng cuốn
+  (lưu `rtl` trong `history.settings`). Test Node assert đúng từng trang ở
+  mỗi bên spread + đúng thứ tự đọc 0→5 của manga 6 trang.
+- **Giao diện làm lại:** mọi tính năng phụ gom vào 1 menu ⋯ duy nhất trong
+  trình đọc (đánh dấu, tìm, lưới trang, gạch chân, TTS, từ điển, cắt lề,
+  zoom/vừa trang, 1/2 trang, manga, lật trang, toàn màn hình, phím tắt).
+  Chrome mặc định chỉ còn: tiêu đề + số trang, thanh tiến độ mỏng, cụm
+  nút nổi. Các thanh TTS/từ điển/cắt lề/gạch chân thành thẻ nổi ở đáy,
+  chỉ hiện khi gọi ra. Thư viện: thẻ sách có bìa màu theo định dạng.
+  Không bỏ tính năng nào — chỉ gom lại vào menu. TTS nay đọc đủ từng
+  trang theo thứ tự đọc (trước đây ở chế độ 2 trang nó nhảy cóc, bỏ qua
+  trang phải của mỗi spread).
+- **Chưa test được ở đây:** không có cargo/WebView trên VM — cần build
+  GitHub Actions + Thiện test trên máy thật: đọc chìm có ẩn hết chrome
+  không, lật còn ngược không (nhất là truyện ảnh CBZ), manga lật đúng
+  chiều + đúng trang chưa, menu mở/đóng có mượt không.
+
 ### Còn lại sau P2
 - **Telegram range-download cho CBZ là phần rủi ro nhất.** Logic tải đuôi ZIP
   → central directory → từng trang đã viết trong `src/lib/telegram.ts`, nhưng
@@ -252,17 +298,41 @@ qua mạng thật, duyệt + tải OPDS từ server thật (Kavita/Komga/Calibre
 đặc biệt là CORS), thống kê đọc sau vài ngày đọc thật (streak), lệnh
 Rust mới biên dịch trên GitHub Actions.
 
+## Kiểm chứng v0.2.0 — chạy trên VM Linux, không có cargo/WebView
+
+Test tự động (`/tmp/v02-test/test.mjs`, bundle bằng esbuild rồi chạy Node):
+90/90 PASS — spread LTR/RTL (bìa manga đứng một mình bên phải, rồi
+(2,3), (4,5)...; trang đọc trước bên phải), thứ tự đọc manga 6 trang
+đúng 0→5 không sót không lặp, lá lật đúng trang trước/sau + đúng phía
+gáy cho cả 4 chế độ (1/2 trang × LTR/RTL, tới/lui), lật 1 trang hiện
+đúng trang đích (không phải đích+1 như bản cũ), trường hợp biên (sách
+lẻ trang, sách 1 trang, trang ngoài khoảng), và hệ số ngang mặt sau
+của lá ở tiến độ 0.6/0.75/0.9/1.0 cho cả 2 phía gáy: bản cũ (soi gương
+sẵn) ÂM = hiện ngược, bản mới (không soi gương sẵn) DƯƠNG = hiện đúng
+chiều, đúng +1 lúc lật xong.
+
+Chưa kiểm chứng được ở đây (cần máy Windows của mày): nhìn bằng mắt
+xem lật còn ngược không (nhất là truyện ảnh CBZ — test trên chỉ chứng
+minh bằng số học, chưa render khung hình giữa cú lật), đọc chìm có ẩn
+hết chrome không (kể cả khi WebView chặn fullscreen thật), manga lật
+đúng chiều + đúng trang chưa, menu mở/đóng + các thẻ nổi có mượt không,
+lệnh Rust không đổi nên build Actions chủ yếu để chốt frontend mới.
+
 ## Cấu trúc code
 
 ```
 src/                  Frontend React + TypeScript + Vite
   App.tsx             Thư viện + mở sách local/Telegram + lưu tiến độ
   components/Reader.tsx    Trình đọc 2 trang, page-curl (fold geometry,
-                           mặt sau soi gương sẵn, rAF ghi thẳng DOM)
+                           mặt sau KHÔNG soi gương — CSS rotateY(180°)
+                           đã triệt tiêu, rAF ghi thẳng DOM); menu ⋯ duy
+                           nhất; đọc chìm toàn màn hình; manga RTL
   components/Library.tsx   "Đang đọc dở" + sách trên máy
   components/TelegramPanel.tsx  Đăng nhập Telegram, liệt kê Saved Messages
   components/UpdateBanner.tsx   Banner + nút "Kiểm tra cập nhật" (OTA kiểu
                            GitHub Releases, xem src/lib/update.ts)
+  lib/spread.ts       Mô hình spread/lá lật thuần (LTR/RTL, 1/2 trang,
+                      hệ số ngang mặt sau để chứng minh lỗi ngược ảnh)
   lib/curl.ts         Hình học nếp gấp (đã chứng minh ở bản web)
   lib/telegram.ts     GramJS MTProto: login, list, tải theo byte-range,
                       đọc chỉ mục ZIP CBZ từ đuôi file
