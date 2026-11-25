@@ -20,7 +20,11 @@ export default function App() {
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [localBooks, setLocalBooks] = useState<BookMeta[]>([]);
   const [open, setOpen] = useState<OpenBook>(null);
-  const [pages, setPages] = useState<ReaderPage[]>([]);
+  const [reader, setReader] = useState<{
+    total: number;
+    initialPages: (ReaderPage | null)[];
+    loadPage: (i: number) => Promise<ReaderPage>;
+  } | null>(null);
   const [title, setTitle] = useState("");
   const [loading, setLoading] = useState("");
   const [rtl, setRtl] = useState(false);
@@ -78,10 +82,13 @@ export default function App() {
             .filter((i) => i < total)
             .map(load),
         );
-        // Reader nhận danh sách đầy đủ bằng lazy loader: ở scaffold này nạp
-        // trước 3 trang, các trang sau nạp khi lật (xem README — cần hoàn thiện
-        // lazy loader cho CBZ 2028 trang trước khi dùng thật).
-        setPages(first);
+        // Mảng thưa: chỉ 3 trang đầu có sẵn, các trang sau Reader nạp lười
+        // qua loadPage khi lật tới — đọc được tới trang cuối của CBZ 2028 trang.
+        const initialPages: (ReaderPage | null)[] = Array(total).fill(null);
+        first.forEach((p, k) => {
+          initialPages[startPage + k] = p;
+        });
+        setReader({ total, initialPages, loadPage: load });
         setTitle(meta.name);
         setOpen({ kind: "local", meta, startPage });
         await saveProgress(meta.id, startPage, total, {
@@ -97,7 +104,11 @@ export default function App() {
           const html = await api.epubChapter(meta.path, ch.href);
           loaded.push({ content: html, isImage: false, label: ch.title });
         }
-        setPages(loaded);
+        setReader({
+          total: loaded.length,
+          initialPages: loaded,
+          loadPage: async (i) => loaded[i],
+        });
         setTitle(meta.name);
         setOpen({ kind: "local", meta, startPage });
         await saveProgress(meta.id, startPage, loaded.length, {
@@ -125,14 +136,17 @@ export default function App() {
     try {
       const { telegramCbzIndex, telegramCbzPage } = await import("./lib/telegram");
       const entries = await telegramCbzIndex(client, file);
-      const first = await Promise.all(
-        entries.slice(0, 3).map(async (e) => ({
-          content: await telegramCbzPage(client, file, e),
-          isImage: true,
-          label: e.name,
-        })),
-      );
-      setPages(first);
+      const load = async (i: number): Promise<ReaderPage> => ({
+        content: await telegramCbzPage(client, file, entries[i]),
+        isImage: true,
+        label: entries[i].name,
+      });
+      const first = await Promise.all([0, 1, 2].filter((i) => i < entries.length).map(load));
+      const initialPages: (ReaderPage | null)[] = Array(entries.length).fill(null);
+      first.forEach((p, k) => {
+        initialPages[k] = p;
+      });
+      setReader({ total: entries.length, initialPages, loadPage: load });
       setTitle(file.name);
       setOpen({ kind: "telegram", file, client, startPage: 0 });
       const id = `tg:${file.file_id}`;
@@ -178,10 +192,12 @@ export default function App() {
       </header>
       {loading && <p className="status">{loading}</p>}
       <UpdateBanner />
-      {open ? (
+      {open && reader ? (
         <Reader
           title={title}
-          pages={pages}
+          total={reader.total}
+          initialPages={reader.initialPages}
+          loadPage={reader.loadPage}
           startPage={open.startPage}
           rtl={rtl}
           onProgress={(page, total) => {
@@ -191,7 +207,7 @@ export default function App() {
           }}
           onClose={() => {
             setOpen(null);
-            setPages([]);
+            setReader(null);
             void reloadHistory();
           }}
         />
