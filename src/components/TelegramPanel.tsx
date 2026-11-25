@@ -1,15 +1,24 @@
 import { useState } from "react";
-import { TelegramClient } from "telegram";
+import type { TelegramClient } from "telegram";
 import type { TelegramFile } from "../types";
-import {
-  createClient,
-  listSavedMessages,
-  loadCredentials,
-  saveCredentials,
-  sendLoginCode,
-  signInWithCode,
-  signInWithPassword,
-} from "../lib/telegram";
+
+// GramJS KHÔNG import tĩnh: nó cần Node (net/socket) mà WebView không có,
+// import tĩnh làm cả app trắng màn hình (bản 0.1.0). Chỉ nạp khi bấm Kết nối,
+// nạp lỗi thì chỉ tab Telegram báo lỗi, thư viện local vẫn chạy.
+type TelegramLib = typeof import("../lib/telegram");
+let tgLib: TelegramLib | null = null;
+async function loadTelegram(): Promise<TelegramLib> {
+  if (!tgLib) tgLib = await import("../lib/telegram");
+  return tgLib;
+}
+
+function telegramLoadError(e: unknown): string {
+  const msg = String(e);
+  if (msg.includes("Failed to fetch dynamically imported module") || msg.includes("Loading chunk")) {
+    return "Không tải được thư viện Telegram trong app (GramJS cần môi trường Node) — tab Telegram tạm chưa dùng được, thư viện sách local vẫn đọc bình thường.";
+  }
+  return `Lỗi: ${msg}`;
+}
 
 interface Props {
   onOpenTelegramBook: (f: TelegramFile, client: TelegramClient) => void;
@@ -37,10 +46,11 @@ export default function TelegramPanel({ onOpenTelegramBook }: Props) {
   const connect = async () => {
     try {
       setStatus("Đang kết nối Telegram…");
-      const saved = passphrase ? await loadCredentials(passphrase) : null;
+      const tg = await loadTelegram();
+      const saved = passphrase ? await tg.loadCredentials(passphrase) : null;
       const id = saved?.apiId ?? Number(apiId);
       const hash = saved?.apiHash ?? apiHash;
-      const c = createClient(id, hash, saved?.session ?? "");
+      const c = tg.createClient(id, hash, saved?.session ?? "");
       await c.connect();
       if (saved?.session) {
         setClient(c);
@@ -48,20 +58,21 @@ export default function TelegramPanel({ onOpenTelegramBook }: Props) {
         await refresh(c);
         return;
       }
-      const hashCode = await sendLoginCode(c, phone);
+      const hashCode = await tg.sendLoginCode(c, phone);
       setPhoneCodeHash(hashCode);
       setClient(c);
       setStatus("Đã gửi mã về điện thoại mày, nhập mã bên dưới.");
     } catch (e) {
-      setStatus(`Lỗi: ${String(e)}`);
+      setStatus(telegramLoadError(e));
     }
   };
 
   const confirmCode = async () => {
     if (!client) return;
     try {
-      const session = await signInWithCode(client, phone, phoneCodeHash, code);
-      await saveCredentials(passphrase || "doc-sach", Number(apiId), apiHash, session);
+      const tg = await loadTelegram();
+      const session = await tg.signInWithCode(client, phone, phoneCodeHash, code);
+      await tg.saveCredentials(passphrase || "doc-sach", Number(apiId), apiHash, session);
       setStatus("Đăng nhập xong, session đã lưu mã hóa trên máy mày.");
       await refresh(client);
     } catch (e) {
@@ -70,7 +81,7 @@ export default function TelegramPanel({ onOpenTelegramBook }: Props) {
         setNeeds2FA(true);
         setStatus("Tài khoản bật 2FA — nhập mật khẩu Telegram.");
       } else {
-        setStatus(`Lỗi: ${msg}`);
+        setStatus(telegramLoadError(e));
       }
     }
   };
@@ -78,17 +89,19 @@ export default function TelegramPanel({ onOpenTelegramBook }: Props) {
   const confirmPassword = async () => {
     if (!client) return;
     try {
-      const session = await signInWithPassword(client, password);
-      await saveCredentials(passphrase || "doc-sach", Number(apiId), apiHash, session);
+      const tg = await loadTelegram();
+      const session = await tg.signInWithPassword(client, password);
+      await tg.saveCredentials(passphrase || "doc-sach", Number(apiId), apiHash, session);
       setStatus("Đăng nhập xong (2FA).");
       await refresh(client);
     } catch (e) {
-      setStatus(`Lỗi: ${String(e)}`);
+      setStatus(telegramLoadError(e));
     }
   };
 
   const refresh = async (c: TelegramClient) => {
-    const list = await listSavedMessages(c, 100);
+    const tg = await loadTelegram();
+    const list = await tg.listSavedMessages(c, 100);
     setFiles(list);
     setStatus(`Tìm thấy ${list.length} file sách trong Saved Messages.`);
   };
