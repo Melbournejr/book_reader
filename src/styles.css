@@ -19,9 +19,14 @@ input, select { padding: 6px; margin: 2px; }
 .page-blank { background: #f5efe0; }
 .epub-page { padding: 24px 32px; line-height: 1.7; font-size: 17px; }
 .epub-page img { max-width: 100%; }
-.curl-leaf { position: absolute; inset: 0; pointer-events: none; transform-style: preserve-3d; }
-.leaf-front, .leaf-back { position: absolute; inset: 0; backface-visibility: hidden; background: #f5efe0; box-shadow: 0 0 24px rgba(0,0,0,.45); }
+.curl-leaf { position: absolute; top: 0; bottom: 0; pointer-events: none; transform-style: preserve-3d; }
+.leaf-front, .leaf-back { position: absolute; inset: 0; backface-visibility: hidden; background: #f5efe0; }
 .leaf-back { transform: rotateY(180deg); }
+.curl-shadow { position: absolute; top: 0; bottom: 0; width: 50%; pointer-events: none; background: linear-gradient(90deg, rgba(0,0,0,0), rgba(0,0,0,.55)); opacity: 0; }
+.curl-shadow.flip { transform: scaleX(-1); }
+.leaf-crease { position: absolute; top: 0; bottom: 0; width: 14%; pointer-events: none; background: linear-gradient(90deg, rgba(0,0,0,.55), rgba(255,255,255,.22) 45%, rgba(0,0,0,0) 75%); opacity: 0; }
+.leaf-crease.flip { transform: scaleX(-1); }
+.page-loading { display: flex; align-items: center; justify-content: center; color: #888; font-size: 14px; min-height: 200px; }
 .hint { color: #aaa; font-size: 13px; text-align: center; }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; max-width: 700px; }
 .form-grid label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
