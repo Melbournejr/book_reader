@@ -1,10 +1,12 @@
-import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import type { TelegramClient } from "telegram";
 import { api } from "./lib/api";
 import type { BookMeta, HistoryEntry, TelegramFile } from "./types";
 import Library from "./components/Library";
 import Reader, { type ReaderPage } from "./components/Reader";
 import UpdateBanner from "./components/UpdateBanner";
+import { parseMobi } from "./lib/mobi";
+import { readFileBytes } from "./lib/files";
 
 // Telegram (GramJS) KHÔNG import tĩnh ở đây: GramJS cần Node (net/socket)
 // mà WebView của Tauri không có, import tĩnh làm cả app trắng màn hình
@@ -28,6 +30,8 @@ export default function App() {
   const [title, setTitle] = useState("");
   const [loading, setLoading] = useState("");
   const [rtl, setRtl] = useState(false);
+  /** Dọn dẹp sách đang mở (đóng PDF...) khi thoát khỏi trình đọc. */
+  const cleanupRef = useRef<(() => void) | null>(null);
 
   const reloadHistory = useCallback(async () => {
     try {
@@ -65,7 +69,34 @@ export default function App() {
     [history, title],
   );
 
-  // ---- Mở sách local: CBZ đọc lười từng trang, EPUB đọc chương trong RAM ----
+  // Dịch mã lỗi từ các bộ đọc (PDF/MOBI/CBR) thành câu báo rõ cho người đọc.
+  const friendlyOpenError = (e: unknown): string => {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg.includes("PDF_MAT_KHAU"))
+      return "File PDF này có mật khẩu — app chưa mở được PDF có mật khẩu.";
+    if (msg.includes("MOBI_DRM"))
+      return "File MOBI/AZW3 này có DRM — app không mở được sách có DRM.";
+    if (msg.includes("MOBI_HUFF"))
+      return "File MOBI này dùng nén Huff/CDIC — app chưa hỗ trợ, chỉ đọc được nén PalmDOC/không nén.";
+    if (msg.includes("MOBI_KF8"))
+      return "File AZW3 này chỉ có phần KF8 — app chưa đọc được, chỉ đọc được file có phần Mobi7.";
+    if (msg.includes("MOBI_KHONG_HOP_LE"))
+      return "File này không phải MOBI/AZW3 hợp lệ.";
+    if (msg.includes("CBR_MA_KHAU"))
+      return "File RAR này có mật khẩu — app chưa mở được RAR có mật khẩu.";
+    if (msg.includes("CBR_TAP"))
+      return "File RAR này chia nhiều tập — app chưa mở được RAR nhiều tập, gom lại 1 file rồi mở.";
+    if (msg.includes("CBR_KHONG_CO_ANH"))
+      return "File RAR này không có ảnh truyện nào bên trong.";
+    if (msg.includes("CBR_KHONG_MO_DUOC"))
+      return "Không mở được file RAR này (file hỏng hoặc định dạng lạ).";
+    if (msg.includes("CBR_WASM"))
+      return "Không nạp được bộ giải nén RAR — thử mở lại app.";
+    return msg;
+  };
+
+  // ---- Mở sách local: CBZ/CBR đọc lười từng trang, EPUB/MOBI đọc chương,
+  // PDF render từng trang qua pdf.js (range transport, không nạp cả file) ----
   const openLocal = async (meta: BookMeta, startPage = 0) => {
     setLoading(`Đang mở ${meta.name}…`);
     try {
@@ -117,12 +148,80 @@ export default function App() {
           title: meta.name,
           format: "epub",
         });
+      } else if (meta.format === "pdf") {
+        // pdf.js nặng (~500KB) nên chỉ nạp khi mở PDF, như GramJS chỉ nạp
+        // khi mở tab Telegram — app mở lên vẫn nhẹ.
+        const { openPdf, setupPdfWorker } = await import("./lib/pdf");
+        setupPdfWorker();
+        const book = await openPdf(meta.path, meta.size);
+        cleanupRef.current = book.close;
+        const total = book.numPages;
+        const load = (i: number) => book.renderPage(i);
+        const first = await Promise.all(
+          [startPage, startPage + 1, startPage + 2]
+            .filter((i) => i < total)
+            .map(load),
+        );
+        const initialPages: (ReaderPage | null)[] = Array(total).fill(null);
+        first.forEach((p, k) => {
+          initialPages[startPage + k] = p;
+        });
+        setReader({ total, initialPages, loadPage: load });
+        setTitle(meta.name);
+        setOpen({ kind: "local", meta, startPage });
+        await saveProgress(meta.id, startPage, total, {
+          source: "local",
+          path: meta.path,
+          title: meta.name,
+          format: "pdf",
+        });
+      } else if (meta.format === "mobi") {
+        const bytes = await readFileBytes(meta.path, meta.size);
+        const book = parseMobi(bytes, meta.name);
+        const total = book.pages.length;
+        setReader({
+          total,
+          initialPages: book.pages,
+          loadPage: async (i) => book.pages[i],
+        });
+        setTitle(book.title);
+        setOpen({ kind: "local", meta, startPage });
+        await saveProgress(meta.id, startPage, total, {
+          source: "local",
+          path: meta.path,
+          title: book.title,
+          format: "mobi",
+        });
+      } else if (meta.format === "cbr") {
+        const { openCbr } = await import("./lib/cbr");
+        const bytes = await readFileBytes(meta.path, meta.size);
+        const book = await openCbr(bytes);
+        const total = book.names.length;
+        const load = (i: number) => book.page(i);
+        const first = await Promise.all(
+          [startPage, startPage + 1, startPage + 2]
+            .filter((i) => i < total)
+            .map(load),
+        );
+        const initialPages: (ReaderPage | null)[] = Array(total).fill(null);
+        first.forEach((p, k) => {
+          initialPages[startPage + k] = p;
+        });
+        setReader({ total, initialPages, loadPage: load });
+        setTitle(meta.name);
+        setOpen({ kind: "local", meta, startPage });
+        await saveProgress(meta.id, startPage, total, {
+          source: "local",
+          path: meta.path,
+          title: meta.name,
+          format: "cbr",
+        });
       } else {
-        setLoading(`Định dạng ${meta.format.toUpperCase()} ở bản scaffold này chỉ mở xem metadata — PDF/MOBI lật trang sẽ thêm sau (xem README).`);
+        setLoading(`Định dạng ${meta.format.toUpperCase()} chưa hỗ trợ ở bản này.`);
         return;
       }
     } catch (e) {
-      setLoading(`Lỗi mở sách: ${String(e)}`);
+      setLoading(`Lỗi mở sách: ${friendlyOpenError(e)}`);
     } finally {
       setLoading("");
     }
@@ -184,7 +283,7 @@ export default function App() {
   return (
     <main>
       <header className="topbar">
-        <h1>Phần Mềm Đọc Sách</h1>
+        <h1>Mio Reader</h1>
         <label>
           <input type="checkbox" checked={rtl} onChange={(e) => setRtl(e.target.checked)} />
           Manga phải → trái
@@ -206,6 +305,8 @@ export default function App() {
             void saveProgress(id, page, total);
           }}
           onClose={() => {
+            cleanupRef.current?.();
+            cleanupRef.current = null;
             setOpen(null);
             setReader(null);
             void reloadHistory();
