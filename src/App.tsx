@@ -6,6 +6,7 @@ import type { BookMeta, HistoryEntry, TelegramFile } from "./types";
 import Library from "./components/Library";
 import Reader, { type ReaderPage } from "./components/Reader";
 import TelegramPanel from "./components/TelegramPanel";
+import UpdateBanner from "./components/UpdateBanner";
 
 type OpenBook =
   | { kind: "local"; meta: BookMeta; startPage: number }
@@ -170,6 +171,7 @@ export default function App() {
         </label>
       </header>
       {loading && <p className="status">{loading}</p>}
+      <UpdateBanner />
       {open ? (
         <Reader
           title={title}
