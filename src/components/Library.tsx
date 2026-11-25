@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { BookMeta, HistoryEntry } from "../types";
 
 interface Props {
@@ -21,13 +22,27 @@ export default function Library({
   onPickFile,
   onPickFolder,
 }: Props) {
-  const reading = history.filter((h) => h.status !== "done");
+  const [filter, setFilter] = useState("");
+  const q = filter.trim().toLowerCase();
+  const match = (t: string) => !q || t.toLowerCase().includes(q);
+  const reading = history.filter((h) => h.status !== "done" && match(h.title));
+  const books = localBooks.filter((b) => match(b.name));
   return (
     <div className="library">
+      <p>
+        <input
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          placeholder="Tìm theo tên sách…"
+          style={{ width: "min(420px, 90%)" }}
+        />
+      </p>
       <section>
         <h2>Đang đọc dở</h2>
         {reading.length === 0 && (
-          <p className="muted">Chưa có sách nào đang đọc. Mở 1 cuốn bên dưới là nó vào đây.</p>
+          <p className="muted">
+            {q ? "Không có sách nào đang đọc khớp với tìm kiếm." : "Chưa có sách nào đang đọc. Mở 1 cuốn bên dưới là nó vào đây."}
+          </p>
         )}
         <ul className="book-list">
           {reading.map((h) => (
@@ -68,7 +83,7 @@ export default function Library({
           DRM thì app báo rõ.
         </p>
         <ul className="book-list">
-          {localBooks.map((b) => (
+          {books.map((b) => (
             <li key={b.id} className="book-row">
               <div>
                 <strong>{b.name}</strong>{" "}
