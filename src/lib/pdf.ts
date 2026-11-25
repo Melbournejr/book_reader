@@ -156,6 +156,8 @@ export interface PdfBook {
     onProgress: (done: number, total: number) => void,
     signal: AbortSignal,
   ) => Promise<SearchResult[]>;
+  /** Text thuần của 1 trang (cho TTS đọc thành tiếng). */
+  pageText: (i: number) => Promise<string>;
   close: () => void;
 }
 
@@ -312,6 +314,20 @@ export async function openPdf(
     renderPage,
     renderThumb,
     search,
+    /** Text thuần của 1 trang: nối các item text bằng khoảng trắng. */
+    pageText: async (i: number): Promise<string> => {
+      const page = await doc.getPage(i + 1);
+      try {
+        const tc = await page.getTextContent();
+        const parts: string[] = [];
+        for (const it of tc.items) {
+          if ("str" in it && it.str) parts.push(it.str);
+        }
+        return parts.join(" ").replace(/\s+/g, " ").trim();
+      } finally {
+        page.cleanup();
+      }
+    },
     close: () => {
       cache.clear();
       doc.cleanup();

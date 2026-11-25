@@ -5,6 +5,8 @@ import type {
   Chapter,
   Highlight,
   HistoryEntry,
+  StatsPerBook,
+  StatsSummary,
 } from "../types";
 
 export const api = {
@@ -57,4 +59,16 @@ export const api = {
     invoke<string | null>("history_settings_get", { book_id: bookId }),
   historySettingsSave: (bookId: string, settings: string) =>
     invoke("history_settings_save", { book_id: bookId, settings }),
+  statsSession: (s: {
+    book_id: string;
+    started_at: number;
+    ended_at: number;
+    seconds: number;
+    pages_read: number;
+    finished: number;
+  }) => invoke("stats_session", { s }),
+  statsSummary: () => invoke<StatsSummary>("stats_summary"),
+  statsPerBook: () => invoke<StatsPerBook[]>("stats_per_book"),
+  saveBytes: (path: string, b64: string) =>
+    invoke<number>("write_file_bytes", { path, b64 }),
 };
