@@ -113,6 +113,26 @@ npm run tauri dev
      mày**, gửi file truyện vào đó rồi đổi nguồn trong code (xem
      `src/lib/telegram.ts`, hàm `listSavedMessages`).
 
+## Cập nhật bản mới (OTA kiểu GitHub Releases)
+
+Mỗi lần có bản mới, tao push tag `vX.Y.Z` lên repo là GitHub Actions
+build xong đính kèm file `.msi` vào mục **Releases**. App tự kiểm tra
+bản mới nhất khi mở lên (gọi API GitHub Releases, so tag với version
+đang chạy); có bản mới thì hiện banner "Có bản mới vX.Y.Z — Tải về",
+bấm là mở link tải `.msi` bằng trình duyệt hệ thống, tải về cài đè
+lên bản cũ là xong. Nút "Kiểm tra cập nhật" ở đầu app để bấm tay khi
+muốn kiểm tra ngay. Mất mạng hoặc chưa có Release nào thì app báo
+"không kiểm tra được lúc này" rồi thôi, không crash.
+
+**Nói thẳng:** đây là thông báo bản mới + tải về, KHÔNG phải tự cài
+lặng lẽ trong nền như OTA trên điện thoại. Muốn tự tải + tự cài im
+lặng thì phải dùng plugin `tauri-plugin-updater`: cần tạo cặp khóa ký
+bằng lệnh `tauri signer generate` trên máy Windows, bỏ khóa công khai
+vào `tauri.conf.json` và khóa riêng vào secret GitHub
+`TAURI_SIGNING_PRIVATE_KEY`, rồi workflow ký file cập nhật mỗi lần
+build. Bước đó chưa làm ở đây — làm sau khi bản đầu tiên build chạy
+ổn đã.
+
 ## Chưa xong / chưa test — nói thẳng
 
 - **Chưa test trên file CBZ 200MB+ thật (Bloody Monday 2028 trang).** Scaffold
@@ -148,11 +168,16 @@ src/                  Frontend React + TypeScript + Vite
                            mặt sau soi gương sẵn, rAF ghi thẳng DOM)
   components/Library.tsx   "Đang đọc dở" + sách trên máy
   components/TelegramPanel.tsx  Đăng nhập Telegram, liệt kê Saved Messages
+  components/UpdateBanner.tsx   Banner + nút "Kiểm tra cập nhật" (OTA kiểu
+                           GitHub Releases, xem src/lib/update.ts)
   lib/curl.ts         Hình học nếp gấp (đã chứng minh ở bản web)
   lib/telegram.ts     GramJS MTProto: login, list, tải theo byte-range,
                       đọc chỉ mục ZIP CBZ từ đuôi file
+  lib/update.ts       So version hiện tại với Release mới nhất trên
+                      GitHub, trả link tải .msi (không cần ký số)
   lib/api.ts          Gọi lệnh Rust qua Tauri invoke
 src-tauri/            Backend Rust (Tauri v2)
+  capabilities/default.json   Quyền: core, dialog, opener (mở link tải)
   src/main.rs         Lệnh: chọn file/thư mục, list sách, cbz_index,
                       cbz_page (chỉ 1 trang), read_range, epub_toc/chapter
   src/db.rs           Khởi tạo SQLite
