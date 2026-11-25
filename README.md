@@ -1,4 +1,4 @@
-# Phần Mềm Đọc Sách — bản Desktop (Tauri v2)
+# Mio Reader — bản Desktop (Tauri v2)
 
 App đọc sách/truyện trên PC, làm đúng 3 ý mày chốt:
 
@@ -135,9 +135,11 @@ build. Bước đó chưa làm ở đây — làm sau khi bản đầu tiên bui
 
 ## Chưa xong / chưa test — nói thẳng
 
-- **Chưa test trên file CBZ 200MB+ thật (Bloody Monday 2028 trang).** Từ v0.1.2
-  Reader đã nạp lười từng trang khi lật tới (local + Telegram) và giải mã
-  spread đích trước khi lật, nhưng chưa ai đọc thử bộ 200MB thật tới cuối.
+- **CBZ 200MB+ (P0 đã test bằng file giả lập, xem dưới).** Từ v0.1.2 Reader
+  đã nạp lười từng trang khi lật tới (local + Telegram) và giải mã spread
+  đích trước khi lật. P0 đã kiểm chứng trên CBZ giả lập ~200MB / 2000 trang
+  (xem "Kiểm chứng P0" dưới) — nhưng chưa ai đọc thử bộ Bloody Monday
+  200MB thật tới cuối trên máy mày.
 - **Telegram range-download cho CBZ là phần rủi ro nhất.** Logic tải đuôi ZIP
   → central directory → từng trang đã viết trong `src/lib/telegram.ts`, nhưng
   chưa chạy thử với tài khoản Telegram thật, chưa test tốc độ/FLOOD_WAIT khi
@@ -153,10 +155,57 @@ build. Bước đó chưa làm ở đây — làm sau khi bản đầu tiên bui
   Frontend đã build thử bằng Vite (xem dưới). Lần build Tauri đầu tiên phải
   là trên GitHub Actions hoặc máy Windows của mày — nếu Rust báo lỗi
   dependency thì gửi lỗi cho tao.
-- **PDF/MOBI:** bản scaffold chỉ mở được metadata; PDF xem từng trang và
-  MOBI không DRM sẽ thêm sau. CBR nén (RAR5) vẫn cần convert sang CBZ.
+- **PDF (v0.1.3): đã đọc được thật, nhưng có giới hạn.** pdf.js 6.5.438
+  render từng trang qua range transport (xin theo đoạn 64KB qua lệnh Rust
+  `read_range`, cache tối đa 12 trang đã render). Đã đo: lúc mở, pdf.js
+  vẫn kéo hết các chunk của file (nó duyệt cây tài liệu lúc setup) và
+  `ChunkedStream` cấp sẵn buffer dài bằng file — nên file PDF 200MB lúc
+  mở sẽ đọc ~200MB và giữ buffer ~200MB trong RAM; cái "lười" thật sự là
+  ở khâu render từng trang (chỉ render trang đang xem). File PDF có mật
+  khẩu chỉ báo "file có mật khẩu, chưa mở được" (chưa có chỗ nhập mật khẩu
+  ở P0). PDF dùng font lạ/CJK có thể thiếu glyph (chưa kèm CMap).
+- **MOBI/AZW3 (v0.1.3): đã đọc được thật, nhưng có giới hạn.** Parser
+  PalmDB/MOBI viết tay (`src/lib/mobi.ts`), đã test trên file MOBI tự tạo:
+  PalmDOC nén/không nén, chia trang theo `<mbp:pagebreak>`, ảnh nhúng trong
+  sách hiện được. Chưa test trên MOBI thật mua từ Kindle/Calibre (cấu trúc
+  EXTH/Huffman có thể khác). File nén Huffman/CDIC (compression 17480) và
+  file chỉ có KF8 (AZW3 không còn phần Mobi7) báo lỗi rõ, chưa đọc được.
+  File DRM báo rõ "có DRM, không mở được".
+- **CBR (v0.1.3): đã mở được thật, nhưng có giới hạn.** Dùng node-unrar-js
+  (WASM từ lib unrar chính thức), đọc lười từng trang như CBZ, không cần
+  cài gì thêm trên Windows. Đã test RAR5 thường/solid/stored + file có mật
+  khẩu (báo rõ). Giới hạn: toàn bộ file RAR phải nạp vào RAM trước khi mở
+  (RAR 200MB+ sẽ nặng máy — truyện lớn nên dùng CBZ); không mở được RAR
+  nhiều tập và RAR mã hóa header; RAR4 chưa test bằng file thật (chỉ biết
+  lib unrar 6.1.7 hỗ trợ RAR4); file solid lật trang cuối chậm hơn vì lib
+  phải giải nén phần trước.
 - **Không ký code:** .exe/.msi unsigned, SmartScreen hỏi lần đầu là bình
   thường.
+
+## Kiểm chứng P0 (v0.1.3) — chạy trên VM Linux, không có cargo/WebView
+
+Test tự động (`/tmp/p0-test/test.mjs`, bundle bằng esbuild rồi chạy Node):
+24/24 PASS — PalmDOC decode ví dụ chuẩn của spec; MOBI nén/không nén
+(tiêu đề, 3 trang, ảnh nhúng, lỗi DRM); PDF 3 trang render ra JPEG,
+PDF 3000 trang (~1.1MB) render trang cuối, transport xin theo đoạn
+64KB; CBR RAR5 thường/solid/stored (byte trang trùng file gốc theo
+SHA256), RAR có mật khẩu → lỗi rõ, file rác → lỗi rõ.
+
+CBZ ~200MB giả lập: đã kiểm chứng ngày 2026-11-25 trên file tự tạo
+424.2 MB / 2000 trang JPEG (~224KB/trang, to hơn mục tiêu 200MB nên
+càng nặng hơn file thật cần test). Mở file: đọc đuôi ZIP + central
+directory hết 12 ms, liệt kê đủ 2000 trang. Lật tới trang đầu/giữa/
+cuối: 7 ms / 4 ms / 3 ms, mỗi lần chỉ giải nén đúng 1 trang (~224KB),
+RAM tăng thêm 2.8 MB trong lúc test 3 trang — tức là đường đọc lười
+không nạp cả file vào RAM. Lưu ý: đây là kiểm chứng cấu trúc file ZIP
++ cùng kiểu truy cập như lệnh Rust `cbz_index`/`cbz_page` (đọc đuôi
+file rồi giải nén từng trang), chạy bằng Node trên VM — lệnh Rust thật
+và app thật trên WebView chưa chạy được ở đây (không có cargo), nên
+vẫn cần Thiện đọc bộ Bloody Monday thật tới cuối trên máy để chốt.
+
+Chưa kiểm chứng được ở đây (cần máy Windows của mày): mở PDF/MOBI/CBR
+thật trong app (WebView2), đọc CBZ Bloody Monday 200MB thật tới trang
+cuối, Telegram range-download với tài khoản thật.
 
 ## Cấu trúc code
 
@@ -175,6 +224,20 @@ src/                  Frontend React + TypeScript + Vite
   lib/update.ts       So version hiện tại với Release mới nhất trên
                       GitHub, trả link tải .msi (không cần ký số)
   lib/api.ts          Gọi lệnh Rust qua Tauri invoke
+  lib/files.ts      Đọc file local theo đoạn (read_range), base64, nhận
+                    dạng ảnh theo magic bytes
+  lib/pdf.ts        pdf.js 6.5.438: mở PDF qua range transport 64KB,
+                    render từng trang ra JPEG (cache 12 trang),
+                    polyfill ES2025 (toHex/toBase64/Map upsert/
+                    Math.sumPrecise) cho WebView2 cũ; font chuẩn
+                    trong public/standard_fonts/
+  lib/mobi.ts       Parser PalmDB/MOBI viết tay: PalmDOC, EXTH, ảnh
+                    nhúng, chia trang theo pagebreak (không DRM,
+                    không Huffman, không KF8-only)
+  lib/cbr.ts        node-unrar-js (WASM): mở RAR/RAR5, đọc lười
+                    từng trang như CBZ
+public/standard_fonts/  Font chuẩn của pdf.js (Foxit .pfb + Liberation
+                    .ttf) — copy từ node_modules/pdfjs-dist/standard_fonts/
 src-tauri/            Backend Rust (Tauri v2)
   capabilities/default.json   Quyền: core, dialog, opener (mở link tải)
   src/main.rs         Lệnh: chọn file/thư mục, list sách, cbz_index,
