@@ -1,0 +1,1 @@
+{"$schema":"../gen/schemas/capabilities.json","description":"Quyền chạy app đọc sách: lõi Tauri, hộp thoại chọn file, mở link tải bản mới bằng trình duyệt hệ thống.","identifier":"default","permissions":["core:default","dialog:default","opener:allow-open-url"],"windows":["main"]}
