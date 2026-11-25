@@ -1,12 +1,26 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import type { TelegramClient } from "telegram";
 import { api } from "./lib/api";
-import type { BookMeta, HistoryEntry, TelegramFile } from "./types";
+import type {
+  BookMeta,
+  HistoryEntry,
+  PdfRect,
+  ReaderSettings,
+  SearchResult,
+  TelegramFile,
+} from "./types";
 import Library from "./components/Library";
-import Reader, { type ReaderPage } from "./components/Reader";
+import Reader, {
+  type JumpRequest,
+  type ReaderPage,
+  type ReaderSearchApi,
+  type ReaderThumbApi,
+} from "./components/Reader";
 import UpdateBanner from "./components/UpdateBanner";
 import { parseMobi } from "./lib/mobi";
 import { readFileBytes } from "./lib/files";
+import { searchTextPages, stripHtml } from "./lib/search";
+import { downscaleDataUrl } from "./lib/thumbs";
 
 // Telegram (GramJS) KHÔNG import tĩnh ở đây: GramJS cần Node (net/socket)
 // mà WebView của Tauri không có, import tĩnh làm cả app trắng màn hình
@@ -26,12 +40,30 @@ export default function App() {
     total: number;
     initialPages: (ReaderPage | null)[];
     loadPage: (i: number) => Promise<ReaderPage>;
+    searchApi: ReaderSearchApi;
+    thumbApi: ReaderThumbApi;
   } | null>(null);
+  const [initialSettings, setInitialSettings] = useState<ReaderSettings | null>(null);
+  const [jumpRequest, setJumpRequest] = useState<JumpRequest | null>(null);
+  /** Trang PDF đang cần vẽ highlight vàng khi nhảy tới kết quả tìm. */
+  const pdfHlRef = useRef<{ page: number; rects: PdfRect[] } | null>(null);
   const [title, setTitle] = useState("");
   const [loading, setLoading] = useState("");
   const [rtl, setRtl] = useState(false);
   /** Dọn dẹp sách đang mở (đóng PDF...) khi thoát khỏi trình đọc. */
   const cleanupRef = useRef<(() => void) | null>(null);
+
+  /** Cài đặt riêng cuốn này đã lưu (zoom/fit/crop/2-trang), hỏng thì mặc định. */
+  const loadSettings = async (id: string): Promise<ReaderSettings | null> => {
+    try {
+      const raw = await api.historySettingsGet(id);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as ReaderSettings;
+      return parsed && typeof parsed === "object" ? parsed : null;
+    } catch {
+      return null;
+    }
+  };
 
   const reloadHistory = useCallback(async () => {
     try {
@@ -119,7 +151,20 @@ export default function App() {
         first.forEach((p, k) => {
           initialPages[startPage + k] = p;
         });
-        setReader({ total, initialPages, loadPage: load });
+        // Truyện ảnh: không tìm được chữ trong tranh; thumbnail thu nhỏ
+        // từ trang đầy đủ khi lưới trang cuộn tới.
+        const thumb = async (i: number): Promise<string | null> => {
+          const p = await load(i);
+          return p.isImage ? downscaleDataUrl(p.content) : null;
+        };
+        setReader({
+          total,
+          initialPages,
+          loadPage: load,
+          searchApi: { search: null },
+          thumbApi: { thumb },
+        });
+        setInitialSettings(await loadSettings(meta.id));
         setTitle(meta.name);
         setOpen({ kind: "local", meta, startPage });
         await saveProgress(meta.id, startPage, total, {
@@ -139,7 +184,17 @@ export default function App() {
           total: loaded.length,
           initialPages: loaded,
           loadPage: async (i) => loaded[i],
+          // Sách chữ: tìm trong text các chương (đã bóc thẻ HTML).
+          searchApi: {
+            search: async (query, onProgress) => {
+              const texts = loaded.map((p) => ({ label: p.label, text: stripHtml(p.content) }));
+              return searchTextPages(texts, query, onProgress);
+            },
+          },
+          // Sách chữ: lưới trang hiện danh sách chương thay vì ảnh.
+          thumbApi: { thumb: null, chapterTitles: loaded.map((p) => p.label) },
         });
+        setInitialSettings(await loadSettings(meta.id));
         setTitle(meta.name);
         setOpen({ kind: "local", meta, startPage });
         await saveProgress(meta.id, startPage, loaded.length, {
@@ -156,7 +211,9 @@ export default function App() {
         const book = await openPdf(meta.path, meta.size);
         cleanupRef.current = book.close;
         const total = book.numPages;
-        const load = (i: number) => book.renderPage(i);
+        // Trang đang nhảy tới từ kết quả tìm thì render kèm highlight vàng.
+        const load = (i: number) =>
+          book.renderPage(i, pdfHlRef.current?.page === i ? pdfHlRef.current.rects : undefined);
         const first = await Promise.all(
           [startPage, startPage + 1, startPage + 2]
             .filter((i) => i < total)
@@ -166,7 +223,20 @@ export default function App() {
         first.forEach((p, k) => {
           initialPages[startPage + k] = p;
         });
-        setReader({ total, initialPages, loadPage: load });
+        setReader({
+          total,
+          initialPages,
+          loadPage: load,
+          searchApi: {
+            search: (q, onProgress, signal) => book.search(q, onProgress, signal),
+            onJump: (r: SearchResult) => {
+              pdfHlRef.current = { page: r.page, rects: r.rects ?? [] };
+              setJumpRequest({ page: r.page, key: Date.now() });
+            },
+          },
+          thumbApi: { thumb: (i) => book.renderThumb(i) },
+        });
+        setInitialSettings(await loadSettings(meta.id));
         setTitle(meta.name);
         setOpen({ kind: "local", meta, startPage });
         await saveProgress(meta.id, startPage, total, {
@@ -183,7 +253,15 @@ export default function App() {
           total,
           initialPages: book.pages,
           loadPage: async (i) => book.pages[i],
+          searchApi: {
+            search: async (query, onProgress) => {
+              const texts = book.pages.map((p) => ({ label: p.label, text: stripHtml(p.content) }));
+              return searchTextPages(texts, query, onProgress);
+            },
+          },
+          thumbApi: { thumb: null, chapterTitles: book.pages.map((p) => p.label) },
         });
+        setInitialSettings(await loadSettings(meta.id));
         setTitle(book.title);
         setOpen({ kind: "local", meta, startPage });
         await saveProgress(meta.id, startPage, total, {
@@ -207,7 +285,18 @@ export default function App() {
         first.forEach((p, k) => {
           initialPages[startPage + k] = p;
         });
-        setReader({ total, initialPages, loadPage: load });
+        const thumb = async (i: number): Promise<string | null> => {
+          const p = await load(i);
+          return p.isImage ? downscaleDataUrl(p.content) : null;
+        };
+        setReader({
+          total,
+          initialPages,
+          loadPage: load,
+          searchApi: { search: null },
+          thumbApi: { thumb },
+        });
+        setInitialSettings(await loadSettings(meta.id));
         setTitle(meta.name);
         setOpen({ kind: "local", meta, startPage });
         await saveProgress(meta.id, startPage, total, {
@@ -245,10 +334,21 @@ export default function App() {
       first.forEach((p, k) => {
         initialPages[k] = p;
       });
-      setReader({ total: entries.length, initialPages, loadPage: load });
+      const thumb = async (i: number): Promise<string | null> => {
+        const p = await load(i);
+        return p.isImage ? downscaleDataUrl(p.content) : null;
+      };
+      setReader({
+        total: entries.length,
+        initialPages,
+        loadPage: load,
+        searchApi: { search: null },
+        thumbApi: { thumb },
+      });
+      const id = `tg:${file.file_id}`;
+      setInitialSettings(await loadSettings(id));
       setTitle(file.name);
       setOpen({ kind: "telegram", file, client, startPage: 0 });
-      const id = `tg:${file.file_id}`;
       await saveProgress(id, 0, entries.length, {
         source: "telegram",
         telegram_file_id: file.file_id,
@@ -294,6 +394,8 @@ export default function App() {
       {open && reader ? (
         <Reader
           title={title}
+          bookId={open.kind === "local" ? open.meta.id : `tg:${open.file.file_id}`}
+          format={open.kind === "local" ? open.meta.format : "cbz"}
           total={reader.total}
           initialPages={reader.initialPages}
           loadPage={reader.loadPage}
@@ -307,10 +409,17 @@ export default function App() {
           onClose={() => {
             cleanupRef.current?.();
             cleanupRef.current = null;
+            pdfHlRef.current = null;
+            setJumpRequest(null);
+            setInitialSettings(null);
             setOpen(null);
             setReader(null);
             void reloadHistory();
           }}
+          searchApi={reader.searchApi}
+          thumbApi={reader.thumbApi}
+          initialSettings={initialSettings}
+          jumpRequest={jumpRequest}
         />
       ) : (
         <>
