@@ -6,7 +6,7 @@
 // cần cặp khóa ký tạo bằng `tauri signer generate` + secret
 // TAURI_SIGNING_PRIVATE_KEY trên GitHub — chưa làm ở bước này).
 
-export const APP_VERSION = "0.1.1"; // giữ đồng bộ với package.json
+export const APP_VERSION = "0.1.2"; // giữ đồng bộ với package.json
 
 const RELEASES_URL =
   "https://api.github.com/repos/Melbournejr/book_reader/releases/latest";
