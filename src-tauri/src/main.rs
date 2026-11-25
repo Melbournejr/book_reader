@@ -296,6 +296,7 @@ fn history_delete(state: State<AppState>, id: String) -> Result<(), String> {
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let dir = app
                 .path()
