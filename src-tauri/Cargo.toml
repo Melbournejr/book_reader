@@ -1,0 +1,19 @@
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+base64 = "0.22"
+rusqlite = { features = ["bundled"], version = "0.32" }
+serde = { features = ["derive"], version = "1" }
+serde_json = "1"
+sha2 = "0.10"
+tauri = { features = [], version = "2" }
+tauri-plugin-dialog = "2"
+zip = "2"
+
+[package]
+authors = ["Thiện"]
+description = "Đọc sách/truyện trực tiếp từ file trên máy, không clone file. Lịch sử đọc lưu SQLite local. Nguồn Telegram (MTProto) đọc theo byte-range."
+edition = "2021"
+name = "phan-mem-doc-sach-desktop"
+version = "0.1.0"
