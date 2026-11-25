@@ -1,5 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { BookMeta, Chapter, HistoryEntry } from "../types";
+import type {
+  Bookmark,
+  BookMeta,
+  Chapter,
+  Highlight,
+  HistoryEntry,
+} from "../types";
 
 export const api = {
   pickFile: () => invoke<string | null>("pick_file_app"),
@@ -23,4 +29,32 @@ export const api = {
   historyRelink: (oldId: string, newPath: string) =>
     invoke("history_relink", { oldId, newPath }),
   historyDelete: (id: string) => invoke("history_delete", { id }),
+  bookmarkAdd: (b: {
+    book_id: string;
+    page: number;
+    chapter: string | null;
+    note: string | null;
+    created_at: number;
+  }) => invoke("history_bookmark", { b }),
+  bookmarksList: (bookId: string) =>
+    invoke<Bookmark[]>("bookmarks_list", { book_id: bookId }),
+  bookmarkDelete: (id: number) => invoke("bookmark_delete", { id }),
+  highlightAdd: (h: {
+    book_id: string;
+    page: number;
+    chapter: string | null;
+    color: string;
+    text: string;
+    note: string | null;
+    start_off: number;
+    end_off: number;
+    created_at: number;
+  }) => invoke<number>("highlight_add", { h }),
+  highlightsList: (bookId: string) =>
+    invoke<Highlight[]>("highlights_list", { book_id: bookId }),
+  highlightDelete: (id: number) => invoke("highlight_delete", { id }),
+  historySettingsGet: (bookId: string) =>
+    invoke<string | null>("history_settings_get", { book_id: bookId }),
+  historySettingsSave: (bookId: string, settings: string) =>
+    invoke("history_settings_save", { book_id: bookId, settings }),
 };
