@@ -1,0 +1,65 @@
+# Build app Windows (.exe/.msi) trên GitHub Actions — KHÔNG cần máy Windows,
+# KHÔNG cần cài Rust/Node ở máy mày. Chỉ cần push code lên repo GitHub.
+#
+# KHÔNG ký code (unsigned): file .exe/.msi build ra sẽ bị Windows SmartScreen
+# hỏi lần đầu — chạy bằng "More info > Run anyway" (xem README).
+# KHÔNG có secret/credential nào trong workflow này: api_id/api_hash Telegram
+# người dùng tự nhập trong app, lưu mã hóa trên máy họ, không qua GitHub.
+name: Build Windows
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: write # chỉ để tạo GitHub Release khi tag v* (dùng GITHUB_TOKEN tự có)
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cài Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Cài Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cài dependency frontend
+        run: npm ci
+
+      - name: Build Tauri (Windows .exe/.msi)
+        uses: tauri-apps/tauri-action@v0.5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # Không ký code, không tạo updater — chỉ build file cài đặt.
+          args: --verbose
+
+      - name: Upload bản build (.exe/.msi) thành Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: src-tauri/target/release/bundle/
+          if-no-files-found: error
+          retention-days: 30
+
+      # Khi tạo Release với tag v* (vd: v0.1.0), đính kèm file cài đặt vào Release.
+      - name: Đính kèm file vào GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*.exe
+          fail_on_unmatched_files: false
