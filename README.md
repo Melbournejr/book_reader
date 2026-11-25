@@ -135,10 +135,9 @@ build. Bước đó chưa làm ở đây — làm sau khi bản đầu tiên bui
 
 ## Chưa xong / chưa test — nói thẳng
 
-- **Chưa test trên file CBZ 200MB+ thật (Bloody Monday 2028 trang).** Scaffold
-  này mới nạp trước 3 trang đầu khi mở CBZ; lazy loader nạp từng trang khi
-  lật tới cho cả CBZ local lẫn Telegram **cần hoàn thiện trước khi dùng thật**
-  (xem ghi chú trong `src/App.tsx`). Đừng mang đi đọc bộ 200MB ngay.
+- **Chưa test trên file CBZ 200MB+ thật (Bloody Monday 2028 trang).** Từ v0.1.2
+  Reader đã nạp lười từng trang khi lật tới (local + Telegram) và giải mã
+  spread đích trước khi lật, nhưng chưa ai đọc thử bộ 200MB thật tới cuối.
 - **Telegram range-download cho CBZ là phần rủi ro nhất.** Logic tải đuôi ZIP
   → central directory → từng trang đã viết trong `src/lib/telegram.ts`, nhưng
   chưa chạy thử với tài khoản Telegram thật, chưa test tốc độ/FLOOD_WAIT khi
