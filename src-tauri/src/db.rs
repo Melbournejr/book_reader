@@ -43,7 +43,7 @@ pub fn init(path: &Path) -> Result<(), String> {
         );
         -- P2: thống kê đọc — mỗi dòng là 1 phiên đọc (mở sách -> đóng sách).
         -- Ghi khi đóng sách: giây đọc, số trang lật được, có đọc hết sách không.
-        -- Không có cột "ngày" riêng: ngày tính từ started_at (epoch ms).
+        -- Không có cột ngày riêng: ngày tính từ started_at (epoch ms).
         CREATE TABLE IF NOT EXISTS reading_sessions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             book_id TEXT NOT NULL,
