@@ -43,8 +43,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          # Không ký code, không tạo updater — chỉ build file cài đặt.
-          args: --verbose
+          # Ép đóng gói .msi + NSIS .exe: không có --bundles thì CLI chỉ
+          # biên dịch ra .exe trơn mà không chạy bước bundling (build #2).
+          args: --verbose --bundles msi nsis
 
       - name: Upload bản build (.exe/.msi) thành Artifact
         uses: actions/upload-artifact@v4
