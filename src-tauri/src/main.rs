@@ -19,7 +19,8 @@ mod epub;
 mod history;
 
 use history::{
-    Bookmark, BookmarkOut, Highlight, HighlightNew, HistoryEntry, HistorySave,
+    Bookmark, BookmarkOut, Highlight, HighlightNew, HistoryEntry, HistorySave, StatsPerBook,
+    StatsSession, StatsSummary,
 };
 
 // ---------- types ----------
@@ -341,6 +342,39 @@ fn history_delete(state: State<AppState>, id: String) -> Result<(), String> {
     history::delete(&p, &id)
 }
 
+// ---------- P2: thống kê đọc ----------
+
+#[tauri::command]
+fn stats_session(state: State<AppState>, s: StatsSession) -> Result<(), String> {
+    let p = state.db_path.lock().unwrap().clone();
+    history::record_session(&p, s)
+}
+
+#[tauri::command]
+fn stats_summary(state: State<AppState>) -> Result<StatsSummary, String> {
+    let p = state.db_path.lock().unwrap().clone();
+    history::stats_summary(&p)
+}
+
+#[tauri::command]
+fn stats_per_book(state: State<AppState>) -> Result<Vec<StatsPerBook>, String> {
+    let p = state.db_path.lock().unwrap().clone();
+    history::stats_per_book(&p)
+}
+
+// ---------- P2: OPDS — ghi file sách đã tải về (frontend tải qua fetch,
+// Rust chỉ ghi bytes ra đĩa; không copy gì vào app) ----------
+
+#[tauri::command]
+fn write_file_bytes(path: String, b64: String) -> Result<u64, String> {
+    let bytes = B64.decode(&b64).map_err(|e| e.to_string())?;
+    if let Some(parent) = Path::new(&path).parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
+    Ok(bytes.len() as u64)
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -379,7 +413,11 @@ fn main() {
             history_settings_get,
             history_settings_save,
             history_relink,
-            history_delete
+            history_delete,
+            stats_session,
+            stats_summary,
+            stats_per_book,
+            write_file_bytes
         ])
         .run(tauri::generate_context!())
         .expect("lỗi khi chạy app Tauri");

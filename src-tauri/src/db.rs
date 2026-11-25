@@ -41,10 +41,23 @@ pub fn init(path: &Path) -> Result<(), String> {
             end_off INTEGER NOT NULL DEFAULT 0,   -- vị trí kết thúc trong text chương
             created_at INTEGER NOT NULL
         );
+        -- P2: thống kê đọc — mỗi dòng là 1 phiên đọc (mở sách -> đóng sách).
+        -- Ghi khi đóng sách: giây đọc, số trang lật được, có đọc hết sách không.
+        -- Không có cột "ngày" riêng: ngày tính từ started_at (epoch ms).
+        CREATE TABLE IF NOT EXISTS reading_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            book_id TEXT NOT NULL,
+            started_at INTEGER NOT NULL, -- epoch ms lúc mở sách
+            ended_at INTEGER NOT NULL,   -- epoch ms lúc đóng sách
+            seconds INTEGER NOT NULL DEFAULT 0,
+            pages_read INTEGER NOT NULL DEFAULT 0,
+            finished INTEGER NOT NULL DEFAULT 0 -- 1 = phiên này đọc tới trang cuối
+        );
         CREATE INDEX IF NOT EXISTS idx_history_last_read ON history(last_read DESC);
         CREATE INDEX IF NOT EXISTS idx_bookmarks_book ON bookmarks(book_id);
         CREATE INDEX IF NOT EXISTS idx_highlights_book ON highlights(book_id);
-",
+        CREATE INDEX IF NOT EXISTS idx_sessions_book ON reading_sessions(book_id);
+        CREATE INDEX IF NOT EXISTS idx_sessions_started ON reading_sessions(started_at);",
     )
     .map_err(|e| e.to_string())?;
     // Cột settings (JSON: zoom/fit/crop/2-trang...) thêm sau cho DB đã tạo

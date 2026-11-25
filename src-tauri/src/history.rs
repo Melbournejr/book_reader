@@ -295,5 +295,120 @@ pub fn delete(db_path: &Path, id: &str) -> Result<(), String> {
         rusqlite::params![id],
     )
     .map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM reading_sessions WHERE book_id = ?1",
+        rusqlite::params![id],
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+// ---------- P2: thống kê đọc ----------
+
+/// 1 phiên đọc, frontend ghi khi đóng sách (xem App.tsx).
+#[derive(Debug, Deserialize)]
+pub struct StatsSession {
+    pub book_id: String,
+    pub started_at: i64,
+    pub ended_at: i64,
+    pub seconds: i64,
+    pub pages_read: i64,
+    pub finished: i64, // 0 | 1
+}
+
+/// Tổng toàn app. `days` là các số ngày riêng biệt đã đọc (ngày UTC =
+/// started_at / 86_400_000); frontend tự tính streak từ danh sách này
+/// (hàm thuần, test được bằng Node) thay vì Rust tính sẵn.
+#[derive(Debug, Serialize)]
+pub struct StatsSummary {
+    pub total_seconds: i64,
+    pub total_pages: i64,
+    pub total_sessions: i64,
+    pub books_finished: i64,
+    pub days: Vec<i64>,
+}
+
+/// 1 dòng thống kê theo từng cuốn (kể cả cuốn chưa có phiên nào: 0 hết).
+#[derive(Debug, Serialize)]
+pub struct StatsPerBook {
+    pub book_id: String,
+    pub title: String,
+    pub seconds: i64,
+    pub pages: i64,
+    pub sessions: i64,
+    pub finished: i64, // 0 | 1 — đã từng đọc hết cuốn này chưa
+    pub last_read: i64,
+}
+
+pub fn record_session(db_path: &Path, s: StatsSession) -> Result<(), String> {
+    let conn = db::open(db_path)?;
+    conn.execute(
+        "INSERT INTO reading_sessions
+            (book_id, started_at, ended_at, seconds, pages_read, finished)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![
+            s.book_id, s.started_at, s.ended_at, s.seconds, s.pages_read, s.finished
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn stats_summary(db_path: &Path) -> Result<StatsSummary, String> {
+    let conn = db::open(db_path)?;
+    let (total_seconds, total_pages, total_sessions, books_finished): (i64, i64, i64, i64) =
+        conn.query_row(
+            "SELECT COALESCE(SUM(seconds), 0), COALESCE(SUM(pages_read), 0),
+                    COUNT(*), COUNT(DISTINCT CASE WHEN finished = 1 THEN book_id END)
+             FROM reading_sessions",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT CAST(started_at / 86400000 AS INTEGER) AS day
+             FROM reading_sessions ORDER BY day DESC",
+        )
+        .map_err(|e| e.to_string())?;
+    let days = stmt
+        .query_map([], |r| r.get::<_, i64>(0))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(StatsSummary {
+        total_seconds,
+        total_pages,
+        total_sessions,
+        books_finished,
+        days,
+    })
+}
+
+pub fn stats_per_book(db_path: &Path) -> Result<Vec<StatsPerBook>, String> {
+    let conn = db::open(db_path)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT h.id, h.title,
+                    COALESCE(SUM(s.seconds), 0), COALESCE(SUM(s.pages_read), 0),
+                    COUNT(s.id), COALESCE(MAX(s.finished), 0), h.last_read
+             FROM history h
+             LEFT JOIN reading_sessions s ON s.book_id = h.id
+             GROUP BY h.id ORDER BY h.last_read DESC",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(StatsPerBook {
+                book_id: r.get(0)?,
+                title: r.get(1)?,
+                seconds: r.get(2)?,
+                pages: r.get(3)?,
+                sessions: r.get(4)?,
+                finished: r.get(5)?,
+                last_read: r.get(6)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
 }
