@@ -135,11 +135,17 @@ build. Bước đó chưa làm ở đây — làm sau khi bản đầu tiên bui
 
 ## Chưa xong / chưa test — nói thẳng
 
-- **CBZ 200MB+ (P0 đã test bằng file giả lập, xem dưới).** Từ v0.1.2 Reader
-  đã nạp lười từng trang khi lật tới (local + Telegram) và giải mã spread
-  đích trước khi lật. P0 đã kiểm chứng trên CBZ giả lập ~200MB / 2000 trang
-  (xem "Kiểm chứng P0" dưới) — nhưng chưa ai đọc thử bộ Bloody Monday
-  200MB thật tới cuối trên máy mày.
+### P1 (v0.1.4) — đã làm xong
+- **Bookmark:** đánh dấu trang/chương (phím B hoặc nút ★), ghi nhãn, nhảy tới, xóa; lưu SQLite bảng `bookmarks` (đã có từ scaffold, P1 mới nối UI + lệnh liệt kê/xóa).
+- **Tìm trong sách:** EPUB/MOBI tìm trong text các chương (tối đa 3 kết quả/chương, có tiến độ); PDF tìm qua pdf.js `getTextContent`, nhảy tới thì vẽ nền vàng lên đúng hộp chữ khớp. Truyện ảnh (CBZ/CBR/Telegram) không tìm được chữ — app báo thẳng trong panel, không giả vờ OCR.
+- **Lưới trang:** thumbnail lười (IntersectionObserver + cache tối đa 60, hủy khi cuộn qua), CBZ/CBR/PDF render thumb nhỏ, EPUB/MOBI hiện danh sách chương thay vì ảnh.
+- **Zoom + vừa trang:** nút +/−, Ctrl+lăn chuột, phím +/−/0, vừa trang/vừa rộng/vừa cao; zoom vượt vừa trang thì tắt lật cong, kéo chuột để rê trang. Nhớ theo từng cuốn (lưu JSON trong `history.settings`).
+- **Cắt lề:** tự phát hiện lề trắng (quét pixel, ngưỡng 242) + kéo thanh trượt từng phía 0–40%, chỉ cắt lúc hiển thị trang ảnh, không sửa file gốc; nhớ theo từng cuốn.
+- **Gạch chân:** EPUB/MOBI bôi đen chữ → lưu highlight (4 màu + ghi chú), vẽ lại `<mark>` khi mở chương, liệt kê/nhảy tới/xóa; lưu SQLite bảng `highlights`. PDF không có gạch chân chữ tự do (trang PDF render thành ảnh, không có lớp text để chọn) — chỉ có highlight vàng khi nhảy tới kết quả tìm.
+- **Thư viện:** ô lọc theo tên sách (cả "Đang đọc dở" lẫn "Sách trên máy này").
+
+### Còn lại sau P1
+- **P2 (chưa làm):** thống kê đọc, TTS đọc sách thành tiếng, tra từ điển, OPDS.
 - **Telegram range-download cho CBZ là phần rủi ro nhất.** Logic tải đuôi ZIP
   → central directory → từng trang đã viết trong `src/lib/telegram.ts`, nhưng
   chưa chạy thử với tài khoản Telegram thật, chưa test tốc độ/FLOOD_WAIT khi
@@ -154,7 +160,24 @@ build. Bước đó chưa làm ở đây — làm sau khi bản đầu tiên bui
 - **Rust chưa được kiểm chứng trên VM này** (VM Linux không có cargo/Rust).
   Frontend đã build thử bằng Vite (xem dưới). Lần build Tauri đầu tiên phải
   là trên GitHub Actions hoặc máy Windows của mày — nếu Rust báo lỗi
-  dependency thì gửi lỗi cho tao.
+  dependency thì gửi lỗi cho tao. Riêng lệnh Rust mới của P1 (liệt kê/xóa
+  bookmark, highlight, settings) cũng chưa biên dịch được ở đây — code
+  viết theo đúng mẫu lệnh cũ đã chạy, nhưng vẫn cần build thật để chốt.
+- **Gạch chân PDF chưa có.** Trang PDF render thành ảnh JPEG nên không
+  chọn được chữ để gạch; chỉ có nền vàng khi nhảy tới kết quả tìm. Muốn
+  gạch tự do trên PDF phải thêm text layer của pdf.js (việc lớn, để P2
+  hoặc sau).
+- **Lưới trang 2000 trang render đủ 2000 ô DOM** (chỉ thumbnail là lười).
+  Với truyện rất dài, lúc mở lưới lần đầu có thể khựng nhẹ; chưa ảo hóa
+  danh sách (virtualization) ở P1.
+- **Tìm trong PDF dày sẽ chậm:** phải đọc text từng trang (getTextContent),
+  PDF vài trăm trang mất vài giây tới vài chục giây; đã có tiến độ + nút
+  Hủy. Tìm EPUB/MOBI thì nhanh (text đã nằm trong RAM).
+- **CBZ 200MB+ (P0 đã test bằng file giả lập, xem dưới).** Từ v0.1.2 Reader
+  đã nạp lười từng trang khi lật tới (local + Telegram) và giải mã spread
+  đích trước khi lật. P0 đã kiểm chứng trên CBZ giả lập ~200MB / 2000 trang
+  (xem "Kiểm chứng P0" dưới) — nhưng chưa ai đọc thử bộ Bloody Monday
+  200MB thật tới cuối trên máy mày.
 - **PDF (v0.1.3): đã đọc được thật, nhưng có giới hạn.** pdf.js 6.5.438
   render từng trang qua range transport (xin theo đoạn 64KB qua lệnh Rust
   `read_range`, cache tối đa 12 trang đã render). Đã đo: lúc mở, pdf.js
