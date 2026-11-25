@@ -3,6 +3,25 @@ import type { BookMeta, HistoryEntry, StatsPerBook, StatsSummary } from "../type
 import StatsView from "./StatsView";
 import OpdsPanel from "./OpdsPanel";
 
+/** Màu bìa theo định dạng — chỉ để nhận diện nhanh bằng mắt. */
+function formatColor(format: string): string {
+  switch (format.toLowerCase()) {
+    case "cbz":
+      return "#7c5cbf";
+    case "cbr":
+      return "#b3541e";
+    case "epub":
+      return "#2e7d6b";
+    case "pdf":
+      return "#b3372f";
+    case "mobi":
+    case "azw3":
+      return "#4a6fa5";
+    default:
+      return "#55555e";
+  }
+}
+
 interface Props {
   history: HistoryEntry[];
   localBooks: BookMeta[];
@@ -60,6 +79,9 @@ export default function Library({
         <ul className="book-list">
           {reading.map((h) => (
             <li key={h.id} className="book-row">
+              <div className="book-cover" style={{ background: formatColor(h.format) }}>
+                {h.format.toUpperCase()}
+              </div>
               <div>
                 <strong>{h.title}</strong>{" "}
                 <span className="muted">
@@ -98,6 +120,9 @@ export default function Library({
         <ul className="book-list">
           {books.map((b) => (
             <li key={b.id} className="book-row">
+              <div className="book-cover" style={{ background: formatColor(b.format) }}>
+                {b.format.toUpperCase()}
+              </div>
               <div>
                 <strong>{b.name}</strong>{" "}
                 <span className="muted">

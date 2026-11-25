@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { easeOutQuart, FLIP_MS, foldGeometry } from "../lib/curl";
+import {
+  leafForFlip,
+  nextSpreadStart,
+  spreadSides,
+  spreadStartForPage,
+} from "../lib/spread";
 import { api } from "../lib/api";
 import { stripHtml } from "../lib/search";
 import {
@@ -113,7 +119,7 @@ export default function Reader({
   initialPages,
   loadPage,
   startPage,
-  rtl,
+  rtl: rtlDefault,
   onProgress,
   onClose,
   searchApi,
@@ -124,10 +130,26 @@ export default function Reader({
 }: Props) {
   const isTextBook = format === "epub" || format === "mobi";
   const ttsAvailable = isTextBook || format === "pdf";
-  const [spread, setSpread] = useState(() => Math.floor(startPage / 2) * 2);
-  const [twoPage, setTwoPage] = useState(initialSettings?.twoPage ?? true);
+  // Chế độ đọc của cuốn này: cài đặt đã lưu thắng, chưa lưu thì lấy mặc
+  // định chung của App (checkbox Manga ở thư viện). Đổi trong menu (⋯)
+  // thì nhớ theo từng cuốn.
+  const initTwoPage = initialSettings?.twoPage ?? true;
+  const initRtl = initialSettings?.rtl ?? rtlDefault;
+  const [spread, setSpread] = useState(() =>
+    spreadStartForPage(startPage, initTwoPage, initRtl, total),
+  );
+  const [twoPage, setTwoPage] = useState(initTwoPage);
+  const [rtl, setRtl] = useState(initRtl);
   const [flipOn, setFlipOn] = useState(true);
-  const [fullscreen, setFullscreen] = useState(false);
+  // ---- v0.2.0: chế độ đọc toàn màn hình "chìm" (immersive) ----
+  // Chỉ còn trang sách + thanh tiến độ mỏng + cụm nút nổi (tự ẩn sau
+  // ~2.5s không cử động chuột). Trạng thái này KHÔNG phụ thuộc vào
+  // Fullscreen API: nếu WebView chặn requestFullscreen thì CSS vẫn ẩn
+  // hết chrome như thường (fallback đã kiểm bằng code, xem README).
+  const [immersive, setImmersive] = useState(false);
+  const [controlsVisible, setControlsVisible] = useState(true);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const idleTimerRef = useRef<number | null>(null);
   // Trong lúc lật, nền hiển thị spread đích để lá lật xong là khớp, không giật.
   const [curlTarget, setCurlTarget] = useState<number | null>(null);
   const [, setCacheVersion] = useState(0);
@@ -199,11 +221,90 @@ export default function Reader({
   const creaseRef = useRef<HTMLDivElement>(null);
   const spreadRef = useRef<HTMLDivElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
-  const dragRef = useRef<{ grabX: number; grabY: number; dir: 1 | -1; slot: "left" | "right"; rect: DOMRect } | null>(null);
+  const dragRef = useRef<{
+    grabX: number;
+    grabY: number;
+    dir: 1 | -1;
+    spineLeft: boolean;
+    next: number;
+    rect: DOMRect;
+  } | null>(null);
   const panRef = useRef<{ x: number; y: number; sl: number; st: number } | null>(null);
-  const curlRef = useRef<{ dir: 1 | -1; slot: "left" | "right"; target: number } | null>(null);
+  const curlRef = useRef<{
+    dir: 1 | -1;
+    spineLeft: boolean;
+    next: number;
+    front: number;
+    back: number;
+  } | null>(null);
   const thumbCacheRef = useRef(new ThumbCache(60));
   const settingsSavedRef = useRef(false);
+
+  // ---- v0.2.0: toàn màn hình "chìm" ----
+  const menuOpenRef = useRef(false);
+  useEffect(() => {
+    menuOpenRef.current = menuOpen;
+  }, [menuOpen]);
+  const pokeControls = useCallback(() => {
+    setControlsVisible(true);
+    if (idleTimerRef.current) window.clearTimeout(idleTimerRef.current);
+    // Menu đang mở thì đừng tự ẩn cụm nút (người đọc còn đang chọn).
+    if (menuOpenRef.current) return;
+    idleTimerRef.current = window.setTimeout(() => setControlsVisible(false), 2500);
+  }, []);
+  // Cử động chuột thì hiện cụm nút nổi, để yên ~2.5s thì tự ẩn.
+  useEffect(() => {
+    if (!immersive) return;
+    pokeControls();
+    window.addEventListener("mousemove", pokeControls);
+    return () => {
+      window.removeEventListener("mousemove", pokeControls);
+      if (idleTimerRef.current) window.clearTimeout(idleTimerRef.current);
+    };
+  }, [immersive, pokeControls]);
+  // Ẩn cả header của App (nằm ngoài Reader) khi đang đọc chìm.
+  useEffect(() => {
+    document.body.classList.toggle("immersive-reading", immersive);
+    return () => {
+      document.body.classList.remove("immersive-reading");
+      // Đóng sách khi đang ở fullscreen thật thì thoát fullscreen luôn.
+      if (document.fullscreenElement) {
+        void document.exitFullscreen().catch(() => {});
+      }
+    };
+  }, [immersive]);
+  // Người đọc bấm Esc trong fullscreen thật: trình duyệt tự thoát
+  // fullscreen -> đồng bộ tắt luôn chế độ chìm.
+  useEffect(() => {
+    const onFs = () => {
+      if (!document.fullscreenElement) setImmersive(false);
+    };
+    document.addEventListener("fullscreenchange", onFs);
+    return () => document.removeEventListener("fullscreenchange", onFs);
+  }, []);
+
+  const enterImmersive = useCallback(async () => {
+    setImmersive(true);
+    setControlsVisible(true);
+    try {
+      // WebView2 thường cho fullscreen; nếu bị chặn thì catch bên dưới
+      // và CSS vẫn ẩn hết chrome — đọc chìm không phụ thuộc API này.
+      await document.documentElement.requestFullscreen();
+    } catch {
+      // Fallback: chỉ ẩn chrome bằng CSS, vẫn đọc toàn màn hình.
+    }
+  }, []);
+  const exitImmersive = useCallback(async () => {
+    setImmersive(false);
+    setMenuOpen(false);
+    if (document.fullscreenElement) {
+      try {
+        await document.exitFullscreen();
+      } catch {
+        // Kệ, đã tắt chế độ chìm bằng CSS rồi.
+      }
+    }
+  }, []);
 
   // Nạp cache ban đầu từ trang đã nạp sẵn.
   useEffect(() => {
@@ -213,11 +314,17 @@ export default function Reader({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const step = twoPage ? 2 : 1;
+  // `cur` = trang đầu tiên theo thứ tự đọc của spread đang mở.
   const cur = Math.min(spread, Math.max(0, total - 1));
   const shownSpread = curlTarget ?? cur;
-  const left = cacheRef.current.get(shownSpread);
-  const right = twoPage ? cacheRef.current.get(shownSpread + 1) : undefined;
+  // Trang ở mỗi bên (RTL: trang đọc trước nằm bên PHẢI, trang sau bên TRÁI).
+  const shownSides = spreadSides(shownSpread, twoPage, rtl, total);
+  const left = shownSides.left !== null ? cacheRef.current.get(shownSides.left) : undefined;
+  const right = shownSides.right !== null ? cacheRef.current.get(shownSides.right) : undefined;
+  const leftIndex = shownSides.left;
+  const rightIndex = shownSides.right;
+  // Spread tiếp theo theo chiều đọc (để nạp trước khi lật tới).
+  const nextSpread = nextSpreadStart(cur, 1, twoPage, rtl, total);
 
   // ---- Đo kích thước để tính zoom/fit ----
   const baseW = twoPage
@@ -285,7 +392,7 @@ export default function Reader({
     void refreshHighlights();
   }, [refreshBookmarks, refreshHighlights]);
 
-  // ---- Lưu cài đặt riêng cuốn này (zoom/fit/crop/2-trang), debounce 500ms ----
+  // ---- Lưu cài đặt riêng cuốn này (zoom/fit/crop/2-trang/manga), debounce 500ms ----
   useEffect(() => {
     if (!settingsSavedRef.current) {
       settingsSavedRef.current = true;
@@ -293,11 +400,11 @@ export default function Reader({
     }
     const t = setTimeout(() => {
       void api
-        .historySettingsSave(bookId, JSON.stringify({ zoom, fit, crop, twoPage }))
+        .historySettingsSave(bookId, JSON.stringify({ zoom, fit, crop, twoPage, rtl }))
         .catch(() => {});
     }, 500);
     return () => clearTimeout(t);
-  }, [zoom, fit, crop, twoPage, bookId]);
+  }, [zoom, fit, crop, twoPage, rtl, bookId]);
 
   const ensure = useCallback(
     async (indices: number[]): Promise<void> => {
@@ -323,10 +430,12 @@ export default function Reader({
     [loadPage, total],
   );
 
-  // Lật tới đâu nạp tới đó: spread hiện tại + spread đích (mặt sau của lá).
+  // Lật tới đâu nạp tới đó: spread hiện tại + spread đích.
   useEffect(() => {
-    void ensure([cur, cur + 1, cur + step, cur + step + 1]);
-  }, [cur, step, ensure]);
+    const pages = [cur, cur + 1];
+    if (nextSpread !== null) pages.push(nextSpread, nextSpread + 1);
+    void ensure(pages);
+  }, [cur, nextSpread, ensure]);
 
   // Vẽ lại gạch chân + xóa đánh dấu tìm cũ mỗi khi đổi trang.
   useEffect(() => {
@@ -353,11 +462,12 @@ export default function Reader({
       if (!ttsAutoRef.current) stopTtsRef.current();
       const n = Math.max(0, Math.min(total - 1, page));
       void ensure([n, n + 1]);
-      setSpread(Math.floor(n / step) * step);
+      setSpread(spreadStartForPage(n, twoPage, rtl, total));
       onProgress(n, total);
       setPanel("none");
+      setMenuOpen(false);
     },
-    [total, step, ensure, onProgress],
+    [total, twoPage, rtl, ensure, onProgress],
   );
 
   // App yêu cầu nhảy tới kết quả tìm PDF: nạp lại trang đó (đã có highlight
@@ -516,12 +626,13 @@ export default function Reader({
       eng.speak(sentences, {
         onSentence: (_i, s) => highlightTtsSentence(p, s),
         onDone: () => {
-          // Hết trang: tự lật sang trang sau và đọc tiếp, tới cuối sách thì dừng.
+          // Hết trang: đọc tiếp trang sau theo thứ tự đọc (kể cả trang còn
+          // lại trong cùng spread), tới cuối sách thì dừng.
           clearTtsMarks();
-          const next = p + step;
+          const next = p + 1;
           if (next < total) {
             ttsAutoRef.current = true;
-            setSpread(Math.floor(next / step) * step);
+            setSpread(spreadStartForPage(next, twoPage, rtl, total));
             onProgress(next, total);
             setTimeout(() => {
               ttsAutoRef.current = false;
@@ -538,7 +649,7 @@ export default function Reader({
         },
       });
     },
-    [cur, step, total, ensure, getTtsText, ttsVoiceURI, ttsRate, highlightTtsSentence, onProgress, getTts, clearTtsMarks],
+    [cur, twoPage, rtl, total, ensure, getTtsText, ttsVoiceURI, ttsRate, highlightTtsSentence, onProgress, getTts, clearTtsMarks],
   );
 
   useEffect(() => {
@@ -556,28 +667,19 @@ export default function Reader({
     }
   }, [ttsState, getTts]);
 
-  /** Trang nào đang lật (bên trái hay phải), theo chiều lật + RTL. */
-  const turningSlot = useCallback(
-    (dir: 1 | -1): "left" | "right" => {
-      if (!twoPage) return "left";
-      const forward = dir === 1;
-      if (rtl) return forward ? "left" : "right";
-      return forward ? "right" : "left";
-    },
-    [twoPage, rtl],
-  );
-
-  /** Ghi tư thế lá lật thẳng vào DOM (không render lại React). */
-  const applyPose = useCallback((progress: number, slot: "left" | "right", tiltDeg: number) => {
+  /** Ghi tư thế lá lật thẳng vào DOM (không render lại React).
+   * `spineLeft` = gáy lá nằm bên trái: lá xoay quanh mép trái, góc âm.
+   * Ngược lại xoay quanh mép phải, góc dương. */
+  const applyPose = useCallback((progress: number, spineLeft: boolean, tiltDeg: number) => {
     const leaf = leafRef.current;
     const shadow = shadowRef.current;
     const crease = creaseRef.current;
     const shade = Math.sin(progress * Math.PI);
     if (leaf) {
-      const sign = slot === "right" ? -1 : 1;
+      const sign = spineLeft ? -1 : 1;
       leaf.style.opacity = progress <= 0 ? "0" : "1";
       leaf.style.transform = `rotateY(${sign * progress * 180}deg) rotateX(${tiltDeg}deg)`;
-      leaf.style.transformOrigin = slot === "right" ? "left center" : "right center";
+      leaf.style.transformOrigin = spineLeft ? "left center" : "right center";
     }
     if (shadow) shadow.style.opacity = String(shade * 0.5);
     if (crease) crease.style.opacity = String(shade * 0.85);
@@ -595,12 +697,12 @@ export default function Reader({
 
   /** Chạy animation lật từ tiến độ `from` tới `to` (0 = chưa lật, 1 = lật xong). */
   const animateCurl = useCallback(
-    (dir: 1 | -1, slot: "left" | "right", from: number, to: number, done: () => void) => {
+    (spineLeft: boolean, from: number, to: number, done: () => void) => {
       const start = performance.now();
       const tick = (now: number) => {
         const t = Math.min(1, (now - start) / FLIP_MS);
         const progress = from + (to - from) * easeOutQuart(t);
-        applyPose(progress, slot, 0);
+        applyPose(progress, spineLeft, 0);
         if (t < 1) requestAnimationFrame(tick);
         else done();
       };
@@ -612,31 +714,36 @@ export default function Reader({
   const commit = useCallback(
     async (dir: 1 | -1, fromProgress = 0) => {
       if (busyRef.current) return;
-      const next = cur + dir * step;
-      if (next < 0 || next >= total) return;
+      // Lá nào lật, hiện trang nào — tính 1 lần từ mô hình spread
+      // (đúng cho cả 1/2 trang × LTR/RTL; xem src/lib/spread.ts).
+      const leaf = leafForFlip(cur, dir, twoPage, rtl, total);
+      if (!leaf) return;
       // Lật tay thì dừng TTS (trừ lúc TTS tự lật sang trang sau).
       if (!ttsAutoRef.current) stopTtsRef.current();
       busyRef.current = true;
-      const slot = turningSlot(dir);
       try {
         // Nạp + giải mã spread đích trước khi lật để không giật giữa chừng.
-        await ensure([next, next + 1]);
-        await decodeImages([cacheRef.current.get(next), cacheRef.current.get(next + 1)]);
+        const dest = spreadSides(leaf.next, twoPage, rtl, total);
+        const destPages = [dest.left, dest.right].filter(
+          (p): p is number => p !== null,
+        );
+        await ensure(destPages);
+        await decodeImages(destPages.map((p) => cacheRef.current.get(p)));
         // Zoom vượt vừa trang thì không lật cong nữa, nhảy thẳng trang.
         if (!flipOn || fromProgress >= 1 || zoomedBeyondFit) {
-          setSpread(next);
-          onProgress(next, total);
+          setSpread(leaf.next);
+          onProgress(leaf.next, total);
           return;
         }
-        curlRef.current = { dir, slot, target: next };
-        setCurlTarget(next);
+        curlRef.current = { dir, spineLeft: leaf.spineLeft, next: leaf.next, front: leaf.front, back: leaf.back };
+        setCurlTarget(leaf.next);
         // Đợi 1 khung hình để nền spread đích vẽ xong rồi mới lật.
         await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
         await new Promise<void>((resolve) => {
-          animateCurl(dir, slot, fromProgress, 1, resolve);
+          animateCurl(leaf.spineLeft, fromProgress, 1, resolve);
         });
-        setSpread(next);
-        onProgress(next, total);
+        setSpread(leaf.next);
+        onProgress(leaf.next, total);
       } finally {
         curlRef.current = null;
         setCurlTarget(null);
@@ -644,7 +751,7 @@ export default function Reader({
         busyRef.current = false;
       }
     },
-    [cur, step, total, flipOn, zoomedBeyondFit, ensure, decodeImages, turningSlot, animateCurl, onProgress, resetPose],
+    [cur, twoPage, rtl, total, flipOn, zoomedBeyondFit, ensure, decodeImages, animateCurl, onProgress, resetPose],
   );
 
   // ---- Bookmarks ----
@@ -776,6 +883,17 @@ export default function Reader({
     }
   }, [left, right]);
 
+  // Mở 1 tab bảng bên (đánh dấu/tìm/lưới/gạch chân). Đang đọc chìm thì
+  // thoát chìm trước — bảng bên cần không gian, không chen vào trang đọc.
+  const openPanel = useCallback(
+    (tab: PanelTab) => {
+      setMenuOpen(false);
+      if (immersive) void exitImmersive();
+      setPanel(tab);
+    },
+    [immersive, exitImmersive],
+  );
+
   // ---- Phím tắt ----
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
@@ -784,23 +902,31 @@ export default function Reader({
       if (e.repeat) return;
       if ((e.ctrlKey || e.metaKey) && (e.key === "f" || e.key === "F")) {
         e.preventDefault();
-        setPanel("search");
+        openPanel("search");
         return;
       }
       if (e.key === "ArrowRight") void commit(rtl ? -1 : 1);
       else if (e.key === "ArrowLeft") void commit(rtl ? 1 : -1);
-      else if (e.key === "f" || e.key === "F") toggleFullscreen();
+      else if (e.key === "f" || e.key === "F") {
+        if (immersive) void exitImmersive();
+        else void enterImmersive();
+      }
       else if (e.key === "t" || e.key === "T") {
         if (ttsState === "playing" || ttsState === "paused") stopTts();
         else void startTts();
       }
       else if (e.key === "Escape") {
-        if (panel !== "none") setPanel("none");
+        if (menuOpen) setMenuOpen(false);
+        else if (panel !== "none") setPanel("none");
+        else if (immersive) void exitImmersive();
         else if (showCrop) setShowCrop(false);
         else if (pendingSelection) setPendingSelection(null);
         else onClose();
       } else if (e.key === "b" || e.key === "B") void toggleBookmark();
-      else if (e.key === "g" || e.key === "G") setPanel((p) => (p === "grid" ? "none" : "grid"));
+      else if (e.key === "g" || e.key === "G") {
+        if (panel === "grid") setPanel("none");
+        else openPanel("grid");
+      }
       else if (e.key === "+" || e.key === "=") setZoom((z) => clampZoom(z * 1.2));
       else if (e.key === "-") setZoom((z) => clampZoom(z / 1.2));
       else if (e.key === "0") setZoom(1);
@@ -808,26 +934,23 @@ export default function Reader({
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [commit, rtl, panel, showCrop, pendingSelection, toggleBookmark, ttsState, startTts, stopTts]);
+  }, [commit, rtl, panel, menuOpen, immersive, showCrop, pendingSelection, toggleBookmark, ttsState, startTts, stopTts, openPanel]);
 
-  const toggleFullscreen = () => {
-    if (document.fullscreenElement) {
-      void document.exitFullscreen();
-      setFullscreen(false);
-    } else {
-      void document.documentElement.requestFullscreen().catch(() => {
-        // Khung nhúng chặn fullscreen thật -> fallback phủ kín cửa sổ app.
-        document.body.classList.toggle("app-fullscreen");
-        setFullscreen((v) => !v);
-      });
-      setFullscreen(true);
-    }
+  const toggleImmersive = () => {
+    if (immersive) void exitImmersive();
+    else void enterImmersive();
   };
 
   const toggleTwoPage = () => {
     const next = !twoPage;
     setTwoPage(next);
-    setSpread(Math.floor(cur / (next ? 2 : 1)) * (next ? 2 : 1));
+    setSpread(spreadStartForPage(cur, next, rtl, total));
+  };
+
+  const toggleRtl = () => {
+    // Đổi chiều đọc của cuốn này (nhớ theo từng cuốn, lưu vào settings).
+    setRtl((v) => !v);
+    setSpread((s) => spreadStartForPage(s, twoPage, !rtl, total));
   };
 
   // ---- Kéo chuột: zoom vượt vừa trang thì rê trang, không thì lật ----
@@ -845,13 +968,16 @@ export default function Reader({
     // Sách chữ: kéo chuột để bôi đen chữ, không kéo lật (lật bằng nút/phím).
     const slotPage = slot === "left" ? left : right;
     if (slotPage && !slotPage.isImage) return;
-    const next = cur + dir * step;
-    if (next < 0 || next >= total) return;
-    dragRef.current = { grabX: e.clientX, grabY: e.clientY, dir, slot, rect };
+    const leaf = leafForFlip(cur, dir, twoPage, rtl, total);
+    if (!leaf) return;
+    dragRef.current = { grabX: e.clientX, grabY: e.clientY, dir, spineLeft: leaf.spineLeft, next: leaf.next, rect };
     busyRef.current = true;
-    curlRef.current = { dir, slot, target: next };
-    setCurlTarget(next);
-    void ensure([next, next + 1]);
+    curlRef.current = { dir, spineLeft: leaf.spineLeft, next: leaf.next, front: leaf.front, back: leaf.back };
+    setCurlTarget(leaf.next);
+    const dest = spreadSides(leaf.next, twoPage, rtl, total);
+    void ensure(
+      [dest.left, dest.right].filter((p): p is number => p !== null),
+    );
     el.setPointerCapture(e.pointerId);
   };
   const onPointerMove = (e: React.PointerEvent) => {
@@ -872,7 +998,7 @@ export default function Reader({
       d.rect.width,
     );
     const tilt = Math.max(-12, Math.min(12, g.creaseAngle * 17));
-    applyPose(g.progress, d.slot, tilt);
+    applyPose(g.progress, d.spineLeft, tilt);
   };
   const onPointerUp = (e: React.PointerEvent) => {
     if (panRef.current) {
@@ -891,11 +1017,14 @@ export default function Reader({
       // Lật hẳn từ đúng tư thế đang kéo.
       void (async () => {
         try {
-          await ensure([cur + d.dir * step, cur + d.dir * step + 1]);
+          const dest = spreadSides(d.next, twoPage, rtl, total);
+          await ensure(
+            [dest.left, dest.right].filter((p): p is number => p !== null),
+          );
           await new Promise<void>((resolve) => {
-            animateCurl(d.dir, d.slot, g.progress, 1, resolve);
+            animateCurl(d.spineLeft, g.progress, 1, resolve);
           });
-          const next = cur + d.dir * step;
+          const next = d.next;
           setSpread(next);
           onProgress(next, total);
         } finally {
@@ -907,7 +1036,7 @@ export default function Reader({
       })();
     } else {
       // Chưa đủ đà: lá nảy về chỗ cũ.
-      animateCurl(d.dir, d.slot, g.progress, 0, () => {
+      animateCurl(d.spineLeft, g.progress, 0, () => {
         curlRef.current = null;
         setCurlTarget(null);
         resetPose();
@@ -966,48 +1095,143 @@ export default function Reader({
     );
   };
 
-  // Trang đích của lá đang lật (mặt sau của tờ giấy).
-  const target = curlTarget ?? cur + step;
-  const leafSlot: "left" | "right" = curlRef.current
-    ? curlRef.current.slot
-    : turningSlot(1);
-  const leafFront = leafSlot === "right" ? right : left;
-  const leafFrontIndex = leafSlot === "right" ? shownSpread + 1 : shownSpread;
-  const leafBack = leafSlot === "right"
-    ? cacheRef.current.get(target)
-    : cacheRef.current.get(target + 1);
-  const leafBackIndex = leafSlot === "right" ? target : target + 1;
-  const bookmarkedHere = bookmarks.some((b) => b.page === cur);
+  // Lá đang lật (mặt trước = trang hiện tại, mặt sau = trang đích).
+  // Khi không lật, lá ẩn (opacity 0) nên giá trị mặc định không quan trọng.
+  const activeCurl = curlRef.current;
+  const leafInfo =
+    activeCurl ??
+    leafForFlip(cur, 1, twoPage, rtl, total) ?? {
+      front: cur,
+      back: cur,
+      spineLeft: !rtl,
+      next: cur,
+    };
+  const leafSpineLeft = leafInfo.spineLeft;
+  const leafFront = cacheRef.current.get(leafInfo.front);
+  const leafBack = cacheRef.current.get(leafInfo.back);
+  const leafFrontIndex = leafInfo.front;
+  const leafBackIndex = leafInfo.back;
+  // Đánh dấu ở 1 trong 2 trang của spread đang mở thì hiện ★.
+  const bookmarkedHere = bookmarks.some(
+    (b) => b.page === cur || (twoPage && b.page === cur + 1),
+  );
 
   return (
-    <div className={`reader ${fullscreen ? "is-fullscreen" : ""}`}>
-      <header className="reader-bar">
-        <button onClick={onClose}>← Thư viện</button>
-        <strong>{title}</strong>
-        <span>
+    <div
+      className={`reader${immersive ? " is-immersive" : ""}${immersive && !controlsVisible ? " controls-hidden" : ""}`}
+    >
+      {menuOpen && <div className="menu-backdrop" onClick={() => setMenuOpen(false)} />}
+      <header className="reader-bar reader-top">
+        <button onClick={onClose} title="Về thư viện (Esc)">
+          ← Thư viện
+        </button>
+        <strong className="reader-title">{title}</strong>
+        <span className="page-label">
           {cur + 1}
-          {twoPage && right ? `–${cur + 2}` : ""} / {total}
+          {twoPage && shownSides.left !== null && shownSides.right !== null
+            ? `–${cur + 2}`
+            : ""}{" "}
+          / {total}
           {bookmarkedHere ? " ★" : ""}
         </span>
-        <button onClick={toggleTwoPage}>{twoPage ? "2 trang" : "1 trang"}</button>
-        <button onClick={() => setFlipOn((v) => !v)}>Lật trang: {flipOn ? "Bật" : "Tắt"}</button>
-        <button onClick={toggleFullscreen}>⛶ Toàn màn hình (F)</button>
-        <button onClick={() => setPanel((p) => (p === "bookmarks" ? "none" : "bookmarks"))}>
-          ★ Đánh dấu (B)
+        <button
+          onClick={() => {
+            setMenuOpen((v) => !v);
+            pokeControls();
+          }}
+          title="Menu — mọi tính năng ở đây"
+          aria-expanded={menuOpen}
+        >
+          ⋯ Menu
         </button>
-        <button onClick={() => setPanel((p) => (p === "search" ? "none" : "search"))}>
-          🔍 Tìm (Ctrl+F)
+        <button onClick={toggleImmersive} title="Đọc toàn màn hình (phím F)">
+          {immersive ? "⛶ Thoát toàn màn hình" : "⛶ Toàn màn hình (F)"}
         </button>
-        <button onClick={() => setPanel((p) => (p === "highlights" ? "none" : "highlights"))}>
-          ✏️ Gạch chân
-        </button>
-        <button onClick={() => setPanel((p) => (p === "grid" ? "none" : "grid"))}>
-          🗂 Lưới trang (G)
-        </button>
-        <button onClick={() => setTtsOpen((v) => !v)} title="Đọc thành tiếng (phím T)">
-          🔊 Đọc thành tiếng{ttsState !== "idle" ? " ▶" : ""}
-        </button>
-        <button onClick={() => setDictOpen((v) => !v)}>📖 Từ điển</button>
+        {menuOpen && (
+          <div className="reader-menu" role="menu">
+              <div className="menu-section">Chế độ đọc</div>
+              <button onClick={toggleTwoPage}>
+                {twoPage ? "▦ 2 trang ✓" : "▤ 1 trang"}
+              </button>
+              <button onClick={toggleRtl}>
+                Manga phải → trái{rtl ? " ✓" : ""}
+              </button>
+              <button onClick={() => setFlipOn((v) => !v)}>
+                Hiệu ứng lật trang: {flipOn ? "Bật" : "Tắt"}
+              </button>
+              <button onClick={toggleImmersive}>
+                ⛶ Toàn màn hình (F){immersive ? " ✓" : ""}
+              </button>
+              <div className="menu-section">Công cụ</div>
+              <button onClick={() => void toggleBookmark()}>
+                ★ Đánh dấu trang này (B){bookmarkedHere ? " ✓" : ""}
+              </button>
+              <button onClick={() => openPanel("bookmarks")}>★ Danh sách đánh dấu</button>
+              <button onClick={() => openPanel("search")}>🔍 Tìm trong sách (Ctrl+F)</button>
+              <button onClick={() => openPanel("grid")}>🗂 Lưới trang (G)</button>
+              <button onClick={() => openPanel("highlights")}>✏️ Gạch chân</button>
+              <button
+                onClick={() => {
+                  setTtsOpen((v) => !v);
+                  setMenuOpen(false);
+                }}
+              >
+                🔊 Đọc thành tiếng (T){ttsState !== "idle" ? " ▶" : ""}
+              </button>
+              <button
+                onClick={() => {
+                  setDictOpen((v) => !v);
+                  setMenuOpen(false);
+                }}
+              >
+                📖 Từ điển
+              </button>
+              <button
+                onClick={() => {
+                  setShowCrop((v) => !v);
+                  setMenuOpen(false);
+                }}
+              >
+                ✂️ Cắt lề{hasCrop(crop) ? " ✓" : ""}
+              </button>
+              <div className="menu-section">Zoom &amp; vừa trang</div>
+              <div className="menu-zoom">
+                <button onClick={() => setZoom((z) => clampZoom(z / 1.2))} title="Thu nhỏ (-)">
+                  −
+                </button>
+                <span>{Math.round(scale * 100)}%</span>
+                <button onClick={() => setZoom((z) => clampZoom(z * 1.2))} title="Phóng to (+)">
+                  +
+                </button>
+                <button onClick={() => setZoom(1)} title="Về 100% (phím 0)">
+                  100%
+                </button>
+                <select
+                  value={fit}
+                  onChange={(e) => setFit(e.target.value as "page" | "width" | "height")}
+                  title="Vừa trang"
+                >
+                  <option value="page">Vừa trang</option>
+                  <option value="width">Vừa rộng</option>
+                  <option value="height">Vừa cao</option>
+                </select>
+              </div>
+              {zoomedBeyondFit && (
+                <div className="menu-note">
+                  Đang zoom: kéo chuột để rê trang, lật bằng nút ← →.
+                </div>
+              )}
+              <div className="menu-section">Phím tắt</div>
+              <div className="menu-note">
+                ← → lật trang • F toàn màn hình • B đánh dấu • Ctrl+F tìm • G
+                lưới trang • +/− zoom • 0 về 100% • T đọc thành tiếng • Esc
+                thoát
+                {isTextBook
+                  ? " • Sách chữ: kéo chuột bôi đen để gạch chân / tra từ"
+                  : ""}
+              </div>
+            </div>
+        )}
       </header>
 
       {ttsOpen && (
@@ -1073,33 +1297,6 @@ export default function Reader({
       )}
 
       {dictOpen && <DictionaryBox word={dictWord} onWordChange={setDictWord} />}
-
-      <div className="reader-bar tools-bar">
-        <button onClick={() => setZoom((z) => clampZoom(z / 1.2))} title="Thu nhỏ (-)">
-          −
-        </button>
-        <span>{Math.round(scale * 100)}%</span>
-        <button onClick={() => setZoom((z) => clampZoom(z * 1.2))} title="Phóng to (+)">
-          +
-        </button>
-        <button onClick={() => setZoom(1)} title="Về 100% (phím 0)">
-          100%
-        </button>
-        <label>
-          Vừa:{" "}
-          <select value={fit} onChange={(e) => setFit(e.target.value as "page" | "width" | "height")}>
-            <option value="page">Vừa trang</option>
-            <option value="width">Vừa rộng</option>
-            <option value="height">Vừa cao</option>
-          </select>
-        </label>
-        <button onClick={() => setShowCrop((v) => !v)}>
-          ✂ Cắt lề{hasCrop(crop) ? " ✓" : ""}
-        </button>
-        {zoomedBeyondFit && (
-          <span className="muted">Đang zoom: kéo chuột để rê trang, lật bằng nút ← →.</span>
-        )}
-      </div>
 
       {showCrop && (
         <div className="crop-bar">
@@ -1202,7 +1399,7 @@ export default function Reader({
                 onPointerMove={onPointerMove}
                 onPointerUp={onPointerUp}
               >
-                {renderFace(left, false, shownSpread)}
+                {renderFace(left, false, leftIndex ?? shownSpread)}
               </div>
               {twoPage && (
                 <div
@@ -1211,25 +1408,29 @@ export default function Reader({
                   onPointerMove={onPointerMove}
                   onPointerUp={onPointerUp}
                 >
-                  {renderFace(right, false, shownSpread + 1)}
+                  {renderFace(right, false, rightIndex ?? shownSpread + 1)}
                 </div>
               )}
               {/* Bóng đổ lên trang đích, đậm dần giữa chừng lật. */}
-              <div ref={shadowRef} className={`curl-shadow${leafSlot === "left" ? " flip" : ""}`} style={{ left: leafSlot === "right" ? "0" : "50%" }} />
+              <div ref={shadowRef} className={`curl-shadow${leafSpineLeft ? "" : " flip"}`} style={{ left: leafSpineLeft ? "0" : "50%" }} />
               {/* Lá đang lật: chỉ ôm 1 trang, xoay quanh gáy. Mặt trước = trang
-                  hiện tại, mặt sau = trang đích (soi gương sẵn để không bị ngược). */}
+                  hiện tại, mặt sau = trang đích. CHÚ Ý (v0.2.0): mặt sau KHÔNG
+                  soi gương sẵn nữa — `.leaf-back { rotateY(180deg) }` trong
+                  CSS đã tự triệt tiêu phép soi gương khi lá xoay đủ 180°;
+                  soi thêm scaleX(-1) như bản 0.1.5 làm trang đích hiện
+                  ngược trong suốt nửa sau của cú lật. */}
               <div
                 ref={leafRef}
                 className="curl-leaf"
                 style={{
-                  left: leafSlot === "right" ? "50%" : "0",
+                  left: twoPage ? (leafSpineLeft ? "50%" : "0") : "0",
                   width: twoPage ? "50%" : "100%",
                   opacity: 0,
                 }}
               >
                 <div className="leaf-front">{renderFace(leafFront, false, leafFrontIndex)}</div>
-                <div className="leaf-back">{renderFace(leafBack, true, leafBackIndex)}</div>
-                <div ref={creaseRef} className={`leaf-crease${leafSlot === "left" ? " flip" : ""}`} style={{ right: leafSlot === "right" ? "auto" : 0, left: leafSlot === "right" ? 0 : "auto" }} />
+                <div className="leaf-back">{renderFace(leafBack, false, leafBackIndex)}</div>
+                <div ref={creaseRef} className={`leaf-crease${leafSpineLeft ? "" : " flip"}`} style={{ right: leafSpineLeft ? "auto" : 0, left: leafSpineLeft ? 0 : "auto" }} />
               </div>
             </div>
           </div>
@@ -1266,38 +1467,37 @@ export default function Reader({
             onJumpHighlight={(h) => jumpTo(h.page)}
             thumbFor={thumbApi.thumb ? loadThumb : null}
             chapterTitles={thumbApi.chapterTitles}
+            rtl={rtl}
           />
         )}
       </div>
 
-      <footer className="reader-bar">
-        <button onClick={() => void commit(-1)} disabled={cur <= 0}>
-          ← Trước
+      <footer className="reader-bar reader-bottom">
+        <button onClick={() => void commit(-1)} disabled={cur <= 0} title="Trang trước (←)">
+          ←
         </button>
         <input
           type="range"
           min={0}
           max={Math.max(0, total - 1)}
           value={cur}
+          style={{ direction: rtl ? "rtl" : "ltr" }}
+          title={`Trang ${cur + 1} / ${total}`}
           onChange={(e) => {
             const n = Number(e.target.value);
             stopTtsRef.current();
             void ensure([n, n + 1]);
-            setSpread(Math.floor(n / step) * step);
+            setSpread(spreadStartForPage(n, twoPage, rtl, total));
             onProgress(n, total);
           }}
         />
-        <button onClick={() => void commit(1)} disabled={cur + step >= total}>
-          Sau →
+        <button onClick={() => void commit(1)} disabled={nextSpread === null} title="Trang sau (→)">
+          →
         </button>
+        <span className="page-label">
+          {cur + 1} / {total}
+        </span>
       </footer>
-      <p className="hint">
-        Kéo chuột từ mép trang để lật như tay cầm sách • ← → lật trang • F toàn
-        màn hình • B đánh dấu • Ctrl+F tìm • G lưới trang • +/− zoom • T đọc
-        thành tiếng • Esc thoát
-        {isTextBook ? " • Sách chữ: kéo chuột để bôi đen rồi gạch chân / tra từ" : ""}
-        {zoomedBeyondFit ? " • Đang zoom: kéo chuột để rê trang" : ""}
-      </p>
     </div>
   );
 }

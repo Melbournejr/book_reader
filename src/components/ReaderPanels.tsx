@@ -35,6 +35,8 @@ interface PanelsProps {
   /** Nạp thumbnail cho trang i; null = hiện danh sách chương thay vì ảnh. */
   thumbFor: ((i: number) => Promise<string | null>) | null;
   chapterTitles?: string[];
+  /** Manga RTL: lưới trang chảy từ phải sang trái. */
+  rtl?: boolean;
 }
 
 function fmtTime(ms: number): string {
@@ -107,7 +109,7 @@ export default function ReaderPanels(props: PanelsProps) {
     searchSupported, searchQuery, onSearchQuery, onSearch, searching,
     searchDone, searchTotal, searchResults, onJumpSearch, onCancelSearch,
     highlights, onDeleteHighlight, onJumpHighlight,
-    thumbFor, chapterTitles,
+    thumbFor, chapterTitles, rtl = false,
   } = props;
   const [bmLabel, setBmLabel] = useState("");
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -272,7 +274,7 @@ export default function ReaderPanels(props: PanelsProps) {
               <p className="muted">
                 {total} trang — thumbnail chỉ nạp khi cuộn tới, bấm vào 1 ô để nhảy tới trang đó.
               </p>
-              <div className="thumb-grid">
+              <div className="thumb-grid" dir={rtl ? "rtl" : "ltr"}>
                 {Array.from({ length: total }, (_, i) => (
                   <ThumbCell
                     key={i}
@@ -288,7 +290,7 @@ export default function ReaderPanels(props: PanelsProps) {
           ) : (
             <>
               <p className="muted">Sách chữ: chọn chương để nhảy tới.</p>
-              <ul className="panel-list">
+              <ul className="panel-list" dir={rtl ? "rtl" : "ltr"}>
                 {(chapterTitles ?? []).map((t, i) => (
                   <li key={i} className={i === cur ? "current" : ""}>
                     <button className="linklike" onClick={() => onJumpTo(i)}>
