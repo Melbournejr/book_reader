@@ -144,8 +144,13 @@ build. Bước đó chưa làm ở đây — làm sau khi bản đầu tiên bui
 - **Gạch chân:** EPUB/MOBI bôi đen chữ → lưu highlight (4 màu + ghi chú), vẽ lại `<mark>` khi mở chương, liệt kê/nhảy tới/xóa; lưu SQLite bảng `highlights`. PDF không có gạch chân chữ tự do (trang PDF render thành ảnh, không có lớp text để chọn) — chỉ có highlight vàng khi nhảy tới kết quả tìm.
 - **Thư viện:** ô lọc theo tên sách (cả "Đang đọc dở" lẫn "Sách trên máy này").
 
-### Còn lại sau P1
-- **P2 (chưa làm):** thống kê đọc, TTS đọc sách thành tiếng, tra từ điển, OPDS.
+### P2 (v0.1.5) — đã làm xong
+- **Thống kê đọc:** mỗi lần đóng sách, app ghi 1 phiên vào SQLite bảng `reading_sessions` (giây đọc, số trang lật được, có đọc tới trang cuối không). Thư viện có mục "Thống kê đọc": tổng thời gian/trang/cuốn xong/ngày đã đọc/chuỗi ngày liên tiếp + từng cuốn (thanh tỉ lệ thời gian, nút Đọc tiếp). Toàn bộ local, không tài khoản, không cloud. Phiên dưới 3 giây + không lật trang nào thì không ghi. Lưu ý: ngày đọc tính theo ngày UTC nên chuỗi ngày có thể lệch 1 ngày quanh nửa đêm giờ Việt Nam.
+- **TTS đọc thành tiếng:** giọng hệ thống của Windows qua `speechSynthesis` (WebView2) — không thư viện thêm, không API key. Nút 🔊 trong trình đọc, phím T: đọc từ trang đang xem, tự lật sang trang sau khi hết trang, tới cuối sách thì dừng; tạm dừng/tiếp tục, tốc độ 0.75–2×, chọn giọng (ưu tiên giọng Việt nếu máy đã cài, rồi giọng Anh). Sách chữ (EPUB/MOBI) tô cam câu đang đọc; PDF đọc tiếng từ text của pdf.js, không tô câu; truyện ảnh không có chữ nên không đọc được — app báo thẳng. Giới hạn: chất lượng giọng hoàn toàn theo giọng Windows đã cài (máy mặc định chỉ có giọng Anh; muốn giọng Việt phải cài thêm gói ngôn ngữ Vietnamese).
+- **Tra từ điển:** bôi đen chữ trong sách chữ → nút "📖 Tra từ" (hoặc nút 📖 Từ điển trên thanh công cụ, nhập tay). Tiếng Anh tra qua dictionaryapi.dev (miễn phí, không key, cần mạng): nghĩa + ví dụ + phiên âm. Từ tiếng Việt hoặc từ không có trong API thì có link mở Wiktionary tiếng Việt/Anh trên trình duyệt. Mất mạng/API lỗi thì báo rõ, không crash. Không kèm file từ điển offline.
+- **OPDS:** mục "OPDS — kéo sách từ server" trong thư viện: dán URL catalogue (Calibre/Kavita/Komga...), đăng nhập HTTP Basic nếu cần, duyệt mục, tìm kiếm nếu feed hỗ trợ (OpenSearch), tải sách về thư mục mày chọn rồi mở đọc như file local (không clone vào app). Hỗ trợ OPDS v1 (Atom XML) và v2 (JSON). Giới hạn: server nào không gửi CORS thì WebView không đọc được catalogue (app báo rõ); chỉ hỗ trợ auth HTTP Basic, không OAuth/token; không hỗ trợ mua sách có giá.
+
+### Còn lại sau P2
 - **Telegram range-download cho CBZ là phần rủi ro nhất.** Logic tải đuôi ZIP
   → central directory → từng trang đã viết trong `src/lib/telegram.ts`, nhưng
   chưa chạy thử với tài khoản Telegram thật, chưa test tốc độ/FLOOD_WAIT khi
@@ -160,9 +165,10 @@ build. Bước đó chưa làm ở đây — làm sau khi bản đầu tiên bui
 - **Rust chưa được kiểm chứng trên VM này** (VM Linux không có cargo/Rust).
   Frontend đã build thử bằng Vite (xem dưới). Lần build Tauri đầu tiên phải
   là trên GitHub Actions hoặc máy Windows của mày — nếu Rust báo lỗi
-  dependency thì gửi lỗi cho tao. Riêng lệnh Rust mới của P1 (liệt kê/xóa
-  bookmark, highlight, settings) cũng chưa biên dịch được ở đây — code
-  viết theo đúng mẫu lệnh cũ đã chạy, nhưng vẫn cần build thật để chốt.
+  dependency thì gửi lỗi cho tao. Riêng lệnh Rust mới của P1/P2 (liệt kê/xóa
+  bookmark, highlight, settings, thống kê đọc, ghi file OPDS) cũng chưa biên
+  dịch được ở đây — code viết theo đúng mẫu lệnh cũ đã chạy, nhưng vẫn cần
+  build thật để chốt.
 - **Gạch chân PDF chưa có.** Trang PDF render thành ảnh JPEG nên không
   chọn được chữ để gạch; chỉ có nền vàng khi nhảy tới kết quả tìm. Muốn
   gạch tự do trên PDF phải thêm text layer của pdf.js (việc lớn, để P2
@@ -230,6 +236,22 @@ Chưa kiểm chứng được ở đây (cần máy Windows của mày): mở PD
 thật trong app (WebView2), đọc CBZ Bloody Monday 200MB thật tới trang
 cuối, Telegram range-download với tài khoản thật.
 
+## Kiểm chứng P2 (v0.1.5) — chạy trên VM Linux, không có cargo/WebView
+
+Test tự động (`/tmp/test-p2.mjs`, bundle bằng esbuild rồi chạy Node):
+55/55 PASS — thống kê (số ngày, streak, định dạng thời gian); TTS tách
+câu (dấu `. ! ? …`, ngoặc kép) + tìm câu bỏ qua khoảng trắng; từ điển
+(bóc JSON dictionaryapi.dev, lỗi 404/mất mạng/từ tiếng Việt, link
+Wiktionary); OPDS (nối URL, nhận link sách theo type/đuôi file, đoán
+đuôi file, tên file an toàn, bóc feed OPDS v2 JSON: tiêu đề, mục duyệt,
+template tìm kiếm, tác giả dạng object/mảng, lọc link không phải sách).
+
+Chưa kiểm chứng được ở đây (cần máy Windows của mày): giọng TTS thật
+trên WebView2 (danh sách giọng + chất lượng giọng Việt), tra từ điển
+qua mạng thật, duyệt + tải OPDS từ server thật (Kavita/Komga/Calibre —
+đặc biệt là CORS), thống kê đọc sau vài ngày đọc thật (streak), lệnh
+Rust mới biên dịch trên GitHub Actions.
+
 ## Cấu trúc code
 
 ```
@@ -259,14 +281,27 @@ src/                  Frontend React + TypeScript + Vite
                     không Huffman, không KF8-only)
   lib/cbr.ts        node-unrar-js (WASM): mở RAR/RAR5, đọc lười
                     từng trang như CBZ
+  lib/stats.ts      (P2) Hàm thuần thống kê đọc: số ngày, streak, định
+                    dạng thời gian — test được bằng Node
+  lib/tts.ts        (P2) TTS qua speechSynthesis: tách câu, engine đọc
+                    từng câu, tô câu đang đọc (mark.tts-current)
+  lib/dictionary.ts (P2) Tra từ dictionaryapi.dev + link Wiktionary
+  lib/opds.ts       (P2) OPDS v1 (Atom XML) + v2 (JSON): bóc feed, tìm
+                    kiếm OpenSearch, đoán đuôi file, tên file an toàn
+  components/StatsView.tsx   (P2) Mục thống kê đọc trong thư viện
+  components/OpdsPanel.tsx   (P2) Duyệt catalogue OPDS + tải sách về
+  components/DictionaryBox.tsx (P2) Ô tra từ trong trình đọc
 public/standard_fonts/  Font chuẩn của pdf.js (Foxit .pfb + Liberation
                     .ttf) — copy từ node_modules/pdfjs-dist/standard_fonts/
 src-tauri/            Backend Rust (Tauri v2)
   capabilities/default.json   Quyền: core, dialog, opener (mở link tải)
   src/main.rs         Lệnh: chọn file/thư mục, list sách, cbz_index,
-                      cbz_page (chỉ 1 trang), read_range, epub_toc/chapter
+                      cbz_page (chỉ 1 trang), read_range, epub_toc/chapter,
+                      thống kê đọc (P2: stats_session/summary/per_book),
+                      write_file_bytes (P2: ghi sách tải từ OPDS)
   src/db.rs           Khởi tạo SQLite
   src/history.rs      Lịch sử đọc + bookmark + relink file bị dời
+                      + highlight + thống kê đọc (P2: reading_sessions)
   src/epub.rs         Đọc EPUB trong RAM (container.xml + opf + ncx)
 .github/workflows/build-windows.yml   Build .exe/.msi trên GitHub Actions
 ```
