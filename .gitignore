@@ -1,0 +1,8 @@
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+*.log
+.DS_Store
+# Session Telegram + api_id/api_hash: KHÔNG BAO GIỜ commit.
+# Chúng nằm trong thư mục dữ liệu của app, không nằm trong repo.
