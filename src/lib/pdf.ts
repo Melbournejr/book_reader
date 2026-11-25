@@ -7,8 +7,10 @@ import {
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import type { ReaderPage } from "../components/Reader";
+import type { PdfRect, SearchResult } from "../types";
 import { api } from "./api";
 import { b64ToBytes } from "./files";
+import { makeSnippet, matchRects, type TextSegment } from "./search";
 
 let workerReady = false;
 
@@ -143,7 +145,17 @@ class TauriRangeTransport extends PDFDataRangeTransport {
 
 export interface PdfBook {
   numPages: number;
-  renderPage: (i: number) => Promise<ReaderPage>;
+  /** Render 1 trang; highlightRects (viewport scale 1) vẽ nền vàng lên
+   *  chỗ khớp khi nhảy tới kết quả tìm — trang có highlight không vào cache. */
+  renderPage: (i: number, highlightRects?: PdfRect[]) => Promise<ReaderPage>;
+  /** Render thumbnail nhỏ (rộng tối đa 240px) cho lưới trang. */
+  renderThumb: (i: number) => Promise<string>;
+  /** Tìm chữ trong toàn bộ PDF, từng trang một (có tiến độ, hủy được). */
+  search: (
+    query: string,
+    onProgress: (done: number, total: number) => void,
+    signal: AbortSignal,
+  ) => Promise<SearchResult[]>;
   close: () => void;
 }
 
@@ -192,9 +204,12 @@ export async function openPdf(
   // Cache trang đã render gần đây (tối đa 12 trang) để lật lại không
   // render lại; quá thì xóa trang cũ nhất, RAM luôn có trần.
   const cache = new Map<number, ReaderPage>();
-  const renderPage = async (i: number): Promise<ReaderPage> => {
-    const hit = cache.get(i);
-    if (hit) return hit;
+  const renderPage = async (i: number, highlightRects?: PdfRect[]): Promise<ReaderPage> => {
+    const highlighted = !!highlightRects && highlightRects.length > 0;
+    if (!highlighted) {
+      const hit = cache.get(i);
+      if (hit) return hit;
+    }
     const page = await doc.getPage(i + 1);
     const v1 = page.getViewport({ scale: 1 });
     const scale = Math.min(2, 1600 / Math.max(1, v1.width));
@@ -202,22 +217,101 @@ export async function openPdf(
     const canvas = makeCanvas(Math.floor(viewport.width), Math.floor(viewport.height));
     await page.render({ canvas, viewport }).promise;
     page.cleanup();
+    if (highlighted) {
+      // Vẽ nền vàng lên đúng hộp chữ khớp (rects ở hệ scale 1 -> nhân scale).
+      const ctx = canvas.getContext("2d");
+      if (ctx) {
+        ctx.fillStyle = "rgba(255, 224, 102, 0.55)";
+        for (const r of highlightRects) {
+          ctx.fillRect(r.x * scale, r.y * scale, r.w * scale, r.h * scale);
+        }
+      }
+    }
     const rp: ReaderPage = {
       content: canvas.toDataURL("image/jpeg", 0.85),
       isImage: true,
       label: `Trang ${i + 1}`,
     };
-    cache.set(i, rp);
-    if (cache.size > 12) {
-      const oldest = cache.keys().next().value;
-      if (oldest !== undefined) cache.delete(oldest);
+    if (!highlighted) {
+      cache.set(i, rp);
+      if (cache.size > 12) {
+        const oldest = cache.keys().next().value;
+        if (oldest !== undefined) cache.delete(oldest);
+      }
     }
     return rp;
+  };
+
+  /** Thumbnail nhỏ cho lưới trang: render thẳng ở scale thấp, không qua cache trang lớn. */
+  const renderThumb = async (i: number): Promise<string> => {
+    const page = await doc.getPage(i + 1);
+    const v1 = page.getViewport({ scale: 1 });
+    const scale = Math.min(0.5, 240 / Math.max(1, v1.width));
+    const viewport = page.getViewport({ scale });
+    const canvas = makeCanvas(Math.floor(viewport.width), Math.floor(viewport.height));
+    await page.render({ canvas, viewport }).promise;
+    page.cleanup();
+    return canvas.toDataURL("image/jpeg", 0.7);
+  };
+
+  /**
+   * Tìm chữ trong toàn bộ PDF: đọc text từng trang qua getTextContent,
+   * mỗi trang trả tối đa 3 kết quả kèm hộp chữ (để vẽ highlight khi nhảy
+   * tới). Đọc từng trang + nhường event loop nên UI không đơ; hủy được
+   * bằng AbortSignal (kết quả dở dang vẫn trả về tới trang đã đọc).
+   */
+  const search = async (
+    query: string,
+    onProgress: (done: number, total: number) => void,
+    signal: AbortSignal,
+  ): Promise<SearchResult[]> => {
+    const q = query.trim().toLowerCase();
+    if (!q) return [];
+    const out: SearchResult[] = [];
+    for (let p = 1; p <= doc.numPages; p++) {
+      if (signal.aborted) return out;
+      const page = await doc.getPage(p);
+      try {
+        const tc = await page.getTextContent();
+        const viewport = page.getViewport({ scale: 1 });
+        // Nối text các item, ghi lại [start,end) của từng item trong chuỗi.
+        let text = "";
+        const segs: TextSegment[] = [];
+        for (const it of tc.items) {
+          if (!("str" in it) || !it.str) continue;
+          const tr = (it as { transform: number[] }).transform;
+          const h = (it as { height?: number }).height ?? 10;
+          const w = (it as { width?: number }).width ?? 0;
+          // transform[4],[5] là góc dưới-trái trong hệ PDF (y từ dưới lên).
+          const x = tr[4];
+          const y = viewport.height - tr[5] - h;
+          const start = text.length;
+          text += it.str;
+          segs.push({ start, end: text.length, x, y, w, h, str: it.str });
+          text += " ";
+        }
+        for (const m of matchRects(text, segs, q)) {
+          out.push({
+            page: p - 1,
+            label: `Trang ${p}`,
+            snippet: makeSnippet(text, m.at, q.length),
+            rects: m.rects,
+          });
+        }
+      } finally {
+        page.cleanup();
+      }
+      onProgress?.(p, doc.numPages);
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    return out;
   };
 
   return {
     numPages: doc.numPages,
     renderPage,
+    renderThumb,
+    search,
     close: () => {
       cache.clear();
       doc.cleanup();
