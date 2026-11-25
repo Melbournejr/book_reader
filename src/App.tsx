@@ -1,12 +1,15 @@
-import { useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import type { TelegramClient } from "telegram";
 import { api } from "./lib/api";
-import { telegramCbzIndex, telegramCbzPage } from "./lib/telegram";
 import type { BookMeta, HistoryEntry, TelegramFile } from "./types";
 import Library from "./components/Library";
 import Reader, { type ReaderPage } from "./components/Reader";
-import TelegramPanel from "./components/TelegramPanel";
 import UpdateBanner from "./components/UpdateBanner";
+
+// Telegram (GramJS) KHÔNG import tĩnh ở đây: GramJS cần Node (net/socket)
+// mà WebView của Tauri không có, import tĩnh làm cả app trắng màn hình
+// (bản 0.1.0). Panel Telegram chỉ nạp khi mở tab, qua dynamic import.
+const TelegramPanel = lazy(() => import("./components/TelegramPanel"));
 
 type OpenBook =
   | { kind: "local"; meta: BookMeta; startPage: number }
@@ -115,9 +118,12 @@ export default function App() {
   };
 
   // ---- Mở sách trên Telegram: tải chỉ mục ZIP từ đuôi file, rồi từng trang ----
+  // Nạp GramJS động ở đây (không import tĩnh): nếu WebView không chạy được
+  // GramJS thì chỉ tab Telegram lỗi, thư viện local vẫn đọc bình thường.
   const openTelegram = async (file: TelegramFile, client: TelegramClient) => {
     setLoading(`Đang mở ${file.name} từ Telegram…`);
     try {
+      const { telegramCbzIndex, telegramCbzPage } = await import("./lib/telegram");
       const entries = await telegramCbzIndex(client, file);
       const first = await Promise.all(
         entries.slice(0, 3).map(async (e) => ({
@@ -212,7 +218,9 @@ export default function App() {
               if (f) setLocalBooks(await api.listBooks(f));
             }}
           />
-          <TelegramPanel onOpenTelegramBook={(f, c) => void openTelegram(f, c)} />
+          <Suspense fallback={<p className="status">Đang tải tab Telegram…</p>}>
+            <TelegramPanel onOpenTelegramBook={(f, c) => void openTelegram(f, c)} />
+          </Suspense>
         </>
       )}
     </main>
