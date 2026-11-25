@@ -64,6 +64,37 @@ export interface Highlight {
   created_at: number;
 }
 
+/** 1 phiên đọc (bảng reading_sessions, P2): ghi khi đóng sách. */
+export interface StatsSession {
+  book_id: string;
+  started_at: number; // epoch ms lúc mở sách
+  ended_at: number; // epoch ms lúc đóng sách
+  seconds: number;
+  pages_read: number;
+  finished: number; // 0 | 1 — phiên này đọc tới trang cuối
+}
+
+/** Tổng thống kê toàn app. `days` = các số ngày UTC đã đọc
+ * (started_at / 86_400_000); streak tính ở frontend từ danh sách này. */
+export interface StatsSummary {
+  total_seconds: number;
+  total_pages: number;
+  total_sessions: number;
+  books_finished: number;
+  days: number[];
+}
+
+/** Thống kê theo từng cuốn (kể cả cuốn chưa có phiên nào: toàn 0). */
+export interface StatsPerBook {
+  book_id: string;
+  title: string;
+  seconds: number;
+  pages: number;
+  sessions: number;
+  finished: number; // 0 | 1 — đã từng đọc hết cuốn này chưa
+  last_read: number;
+}
+
 /** Hộp bao quanh 1 từ/cụm trong trang PDF (hệ tọa độ viewport scale 1). */
 export interface PdfRect {
   x: number;

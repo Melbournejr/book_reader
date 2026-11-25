@@ -7,6 +7,8 @@ import type {
   PdfRect,
   ReaderSettings,
   SearchResult,
+  StatsPerBook,
+  StatsSummary,
   TelegramFile,
 } from "./types";
 import Library from "./components/Library";
@@ -52,6 +54,74 @@ export default function App() {
   const [rtl, setRtl] = useState(false);
   /** Dọn dẹp sách đang mở (đóng PDF...) khi thoát khỏi trình đọc. */
   const cleanupRef = useRef<(() => void) | null>(null);
+  /** P2: TTS cho PDF — text từng trang lấy từ pdf.js (book mở trong openLocal). */
+  const ttsTextRef = useRef<((page: number) => Promise<string | null>) | null>(null);
+  /** P2: thống kê đọc — 1 phiên = mở sách -> đóng sách (ghi SQLite lúc đóng). */
+  const [statsSummary, setStatsSummary] = useState<StatsSummary | null>(null);
+  const [statsPerBook, setStatsPerBook] = useState<StatsPerBook[]>([]);
+  const sessionRef = useRef<{
+    bookId: string;
+    startedAt: number;
+    startPage: number;
+    maxPage: number;
+    total: number;
+  } | null>(null);
+
+  const reloadStats = useCallback(async () => {
+    try {
+      setStatsSummary(await api.statsSummary());
+      setStatsPerBook(await api.statsPerBook());
+    } catch {
+      setStatsSummary(null);
+      setStatsPerBook([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    void reloadStats();
+  }, [reloadStats]);
+
+  /** Ghi phiên đọc vừa xong vào SQLite (quá ngắn + không lật trang nào thì bỏ qua). */
+  const flushSession = useCallback(async () => {
+    const s = sessionRef.current;
+    sessionRef.current = null;
+    if (!s) return;
+    const endedAt = Date.now();
+    const seconds = Math.max(0, Math.round((endedAt - s.startedAt) / 1000));
+    const pages = Math.max(0, s.maxPage - s.startPage);
+    const finished = s.maxPage >= s.total - 1 ? 1 : 0;
+    if (seconds < 3 && pages === 0 && finished === 0) return;
+    try {
+      await api.statsSession({
+        book_id: s.bookId,
+        started_at: s.startedAt,
+        ended_at: endedAt,
+        seconds,
+        pages_read: pages,
+        finished,
+      });
+    } catch {
+      // Ghi thống kê lỗi thì kệ, không chặn việc đọc.
+    }
+  }, []);
+
+  // Mở sách -> bắt đầu phiên; đóng sách (open -> null) -> ghi phiên.
+  useEffect(() => {
+    if (!open || !reader) return;
+    const id = open.kind === "local" ? open.meta.id : `tg:${open.file.file_id}`;
+    sessionRef.current = {
+      bookId: id,
+      startedAt: Date.now(),
+      startPage: open.startPage,
+      maxPage: open.startPage,
+      total: reader.total,
+    };
+    return () => {
+      // Ghi phiên xong rồi mới tải lại thống kê (kẻo thống kê tải
+      // trước khi phiên kịp ghi vào SQLite).
+      void flushSession().then(() => void reloadStats());
+    };
+  }, [open, reader, flushSession, reloadStats]);
 
   /** Cài đặt riêng cuốn này đã lưu (zoom/fit/crop/2-trang), hỏng thì mặc định. */
   const loadSettings = async (id: string): Promise<ReaderSettings | null> => {
@@ -210,6 +280,7 @@ export default function App() {
         setupPdfWorker();
         const book = await openPdf(meta.path, meta.size);
         cleanupRef.current = book.close;
+        ttsTextRef.current = (i) => book.pageText(i);
         const total = book.numPages;
         // Trang đang nhảy tới từ kết quả tìm thì render kèm highlight vàng.
         const load = (i: number) =>
@@ -404,11 +475,15 @@ export default function App() {
           onProgress={(page, total) => {
             const id =
               open.kind === "local" ? open.meta.id : `tg:${open.file.file_id}`;
+            if (sessionRef.current) {
+              sessionRef.current.maxPage = Math.max(sessionRef.current.maxPage, page);
+            }
             void saveProgress(id, page, total);
           }}
           onClose={() => {
             cleanupRef.current?.();
             cleanupRef.current = null;
+            ttsTextRef.current = null;
             pdfHlRef.current = null;
             setJumpRequest(null);
             setInitialSettings(null);
@@ -420,12 +495,15 @@ export default function App() {
           thumbApi={reader.thumbApi}
           initialSettings={initialSettings}
           jumpRequest={jumpRequest}
+          ttsTextForPage={(page) => ttsTextRef.current?.(page) ?? Promise.resolve(null)}
         />
       ) : (
         <>
           <Library
             history={history}
             localBooks={localBooks}
+            statsSummary={statsSummary}
+            statsPerBook={statsPerBook}
             onOpenLocal={(b) => void openLocal(b)}
             onResume={(h) => void resume(h)}
             onRelink={(h) => void relink(h)}
@@ -442,6 +520,10 @@ export default function App() {
             onPickFolder={async () => {
               const f = await api.pickFolder();
               if (f) setLocalBooks(await api.listBooks(f));
+            }}
+            onOpenDownloaded={async (path) => {
+              const meta = await api.fileMetadata(path);
+              await openLocal(meta);
             }}
           />
           <Suspense fallback={<p className="status">Đang tải tab Telegram…</p>}>
