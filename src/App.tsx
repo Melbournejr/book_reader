@@ -455,9 +455,9 @@ export default function App() {
     <main>
       <header className="topbar">
         <h1>Mio Reader</h1>
-        <label>
+        <label title="Mặc định cho sách chưa có cài đặt riêng — đổi trong trình đọc (menu ⋯) thì nhớ theo từng cuốn">
           <input type="checkbox" checked={rtl} onChange={(e) => setRtl(e.target.checked)} />
-          Manga phải → trái
+          Manga phải → trái (mặc định)
         </label>
       </header>
       {loading && <p className="status">{loading}</p>}

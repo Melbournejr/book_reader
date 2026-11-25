@@ -126,6 +126,7 @@ export interface ReaderSettings {
   fit?: "page" | "width" | "height"; // mặc định "page"
   crop?: CropMargins;
   twoPage?: boolean; // nhớ chế độ 1/2 trang của cuốn này
+  rtl?: boolean; // nhớ chế độ manga phải → trái của cuốn này
 }
 
 export const HIGHLIGHT_COLORS: Record<string, string> = {
