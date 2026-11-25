@@ -27,3 +27,4 @@ input, select { padding: 6px; margin: 2px; }
 .form-grid label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
 .telegram-panel { border-top: 1px solid #333; margin-top: 24px; padding-top: 8px; }
 .reader.is-fullscreen { position: fixed; inset: 0; z-index: 60; background: #111; padding: 8px; }
+.update-banner { background: #2d4a2d; border: 1px solid #4caf50; padding: 8px 12px; border-radius: 6px; }
