@@ -62,9 +62,10 @@ export default function Library({
           <button onClick={onPickFolder}>Thêm cả thư mục…</button>
         </p>
         <p className="muted">
-          App chỉ lưu đường dẫn, không copy file. CBZ/EPUB đọc trực tiếp từ file
-          gốc; PDF mở xem từng trang; MOBI/AZW3 bản không DRM đọc được, bản DRM
-          thì app báo rõ.
+          App chỉ lưu đường dẫn, không copy file. CBZ/CBR/EPUB/PDF/MOBI đọc trực
+          tiếp từ file gốc; PDF đọc theo đoạn byte, CBR nạp cả file vào RAM nên
+          file RAR rất lớn sẽ nặng máy; MOBI/AZW3 bản không DRM đọc được, bản
+          DRM thì app báo rõ.
         </p>
         <ul className="book-list">
           {localBooks.map((b) => (
