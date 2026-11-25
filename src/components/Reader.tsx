@@ -1,6 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { easeOutQuart, FLIP_MS, foldGeometry } from "../lib/curl";
 import { api } from "../lib/api";
+import { stripHtml } from "../lib/search";
+import {
+  clearTtsMark,
+  markTtsSentence,
+  splitSentences,
+  TtsEngine,
+  type TtsState,
+} from "../lib/tts";
+import DictionaryBox from "./DictionaryBox";
 import {
   clampCrop,
   cropImgStyle,
@@ -75,6 +84,8 @@ interface Props {
   initialSettings: ReaderSettings | null;
   /** App yêu cầu nhảy tới 1 trang (kết quả tìm PDF đã có highlight). */
   jumpRequest: JumpRequest | null;
+  /** P2: text từng trang PDF (từ pdf.js) để TTS đọc; EPUB/MOBI tự bóc từ chương. */
+  ttsTextForPage?: (page: number) => Promise<string | null>;
 }
 
 const HL_COLORS = [
@@ -109,8 +120,10 @@ export default function Reader({
   thumbApi,
   initialSettings,
   jumpRequest,
+  ttsTextForPage,
 }: Props) {
   const isTextBook = format === "epub" || format === "mobi";
+  const ttsAvailable = isTextBook || format === "pdf";
   const [spread, setSpread] = useState(() => Math.floor(startPage / 2) * 2);
   const [twoPage, setTwoPage] = useState(initialSettings?.twoPage ?? true);
   const [flipOn, setFlipOn] = useState(true);
@@ -154,6 +167,29 @@ export default function Reader({
   } | null>(null);
   const [hlColor, setHlColor] = useState<string>("yellow");
   const [hlNote, setHlNote] = useState("");
+
+  // ---- P2: đọc thành tiếng (TTS) + từ điển ----
+  const [ttsOpen, setTtsOpen] = useState(false);
+  const [ttsState, setTtsState] = useState<TtsState>("idle");
+  const [ttsRate, setTtsRate] = useState(1);
+  const [ttsVoiceURI, setTtsVoiceURI] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem("mio-tts-voice");
+    } catch {
+      return null;
+    }
+  });
+  const [ttsVoices, setTtsVoices] = useState<SpeechSynthesisVoice[]>([]);
+  const [ttsMsg, setTtsMsg] = useState("");
+  const [dictOpen, setDictOpen] = useState(false);
+  const [dictWord, setDictWord] = useState("");
+  const ttsRef = useRef<TtsEngine | null>(null);
+  const ttsPageRef = useRef(-1);
+  const ttsEndRef = useRef(0);
+  /** true trong lúc TTS tự lật trang (để lật trang không dừng TTS). */
+  const ttsAutoRef = useRef(false);
+  const startTtsRef = useRef<(page?: number) => Promise<void>>(async () => {});
+  const stopTtsRef = useRef<() => void>(() => {});
 
   const cacheRef = useRef(new Map<number, ReaderPage>());
   const inflightRef = useRef(new Set<number>());
@@ -313,6 +349,8 @@ export default function Reader({
   // Nhảy tới 1 trang bất kỳ (bookmark / highlight / lưới / tìm).
   const jumpTo = useCallback(
     (page: number) => {
+      // Lật tay thì dừng TTS (trừ lúc TTS tự lật sang trang sau).
+      if (!ttsAutoRef.current) stopTtsRef.current();
       const n = Math.max(0, Math.min(total - 1, page));
       void ensure([n, n + 1]);
       setSpread(Math.floor(n / step) * step);
@@ -365,6 +403,158 @@ export default function Reader({
       }),
     );
   }, []);
+
+  // ---- P2: đọc thành tiếng (TTS) ----
+  const getTts = useCallback(() => {
+    if (!ttsRef.current) ttsRef.current = new TtsEngine();
+    return ttsRef.current;
+  }, []);
+
+  // Nạp danh sách giọng hệ thống (WebView trả rỗng lúc đầu, có sau sự
+  // kiện voiceschanged). Chưa chọn giọng thì ưu tiên giọng Việt, rồi Anh.
+  useEffect(() => {
+    const eng = getTts();
+    if (!eng.supported) return;
+    const load = () => {
+      const vs = eng.getVoices();
+      setTtsVoices(vs);
+      if (!ttsVoiceURI && vs.length > 0) {
+        const vi = vs.find((v) => v.lang.toLowerCase().startsWith("vi"));
+        const en = vs.find((v) => v.lang.toLowerCase().startsWith("en"));
+        const pick = vi ?? en;
+        if (pick) {
+          setTtsVoiceURI(pick.voiceURI);
+          try {
+            localStorage.setItem("mio-tts-voice", pick.voiceURI);
+          } catch {
+            // Bỏ qua lỗi lưu.
+          }
+        }
+      }
+    };
+    load();
+    window.speechSynthesis.addEventListener("voiceschanged", load);
+    return () => window.speechSynthesis.removeEventListener("voiceschanged", load);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [getTts]);
+
+  // Đóng trình đọc thì dừng đọc ngay (kẻo sách đóng rồi vẫn đọc).
+  useEffect(() => () => getTts().stop(), [getTts]);
+
+  const clearTtsMarks = useCallback(() => {
+    spreadRef.current?.querySelectorAll(".epub-page").forEach((el) => {
+      clearTtsMark(el as HTMLElement);
+    });
+    ttsEndRef.current = 0;
+  }, []);
+
+  const stopTts = useCallback(() => {
+    getTts().stop();
+    clearTtsMarks();
+    setTtsState("idle");
+    setTtsMsg("");
+  }, [getTts, clearTtsMarks]);
+
+  useEffect(() => {
+    stopTtsRef.current = stopTts;
+  });
+
+  const getTtsText = useCallback(
+    async (page: number): Promise<string | null> => {
+      if (format === "pdf") {
+        const t = await ttsTextForPage?.(page);
+        return t && t.trim() ? t : null;
+      }
+      const p = cacheRef.current.get(page);
+      if (!p || p.isImage) return null;
+      const t = stripHtml(p.content);
+      return t.trim() ? t : null;
+    },
+    [format, ttsTextForPage],
+  );
+
+  const highlightTtsSentence = useCallback(
+    (page: number, sentence: string) => {
+      if (!isTextBook) return; // PDF: chỉ đọc tiếng, không tô câu.
+      const el = spreadRef.current?.querySelector(
+        `.epub-page[data-page="${page}"]`,
+      ) as HTMLElement | null;
+      if (!el) return;
+      const end = markTtsSentence(el, sentence, ttsEndRef.current);
+      if (end !== null) ttsEndRef.current = end;
+    },
+    [isTextBook],
+  );
+
+  const startTts = useCallback(
+    async (page?: number) => {
+      const eng = getTts();
+      if (!eng.supported) {
+        setTtsMsg("Máy này không có giọng đọc (speechSynthesis) — WebView không hỗ trợ.");
+        return;
+      }
+      const p = page ?? cur;
+      await ensure([p, p + 1]);
+      const text = await getTtsText(p);
+      if (!text) {
+        setTtsMsg("Trang này không có chữ để đọc (truyện ảnh hoặc trang trắng) — dừng tại đây.");
+        setTtsState("idle");
+        return;
+      }
+      const sentences = splitSentences(text);
+      if (sentences.length === 0) {
+        setTtsMsg("Trang này không có chữ để đọc.");
+        setTtsState("idle");
+        return;
+      }
+      ttsPageRef.current = p;
+      ttsEndRef.current = 0;
+      eng.voiceURI = ttsVoiceURI;
+      eng.rate = ttsRate;
+      setTtsState("playing");
+      setTtsMsg(`Đang đọc trang ${p + 1}/${total}…`);
+      eng.speak(sentences, {
+        onSentence: (_i, s) => highlightTtsSentence(p, s),
+        onDone: () => {
+          // Hết trang: tự lật sang trang sau và đọc tiếp, tới cuối sách thì dừng.
+          clearTtsMarks();
+          const next = p + step;
+          if (next < total) {
+            ttsAutoRef.current = true;
+            setSpread(Math.floor(next / step) * step);
+            onProgress(next, total);
+            setTimeout(() => {
+              ttsAutoRef.current = false;
+              void startTtsRef.current(next);
+            }, 350);
+          } else {
+            setTtsState("idle");
+            setTtsMsg("Đã đọc hết sách.");
+          }
+        },
+        onError: (m) => {
+          setTtsMsg(m);
+          setTtsState("idle");
+        },
+      });
+    },
+    [cur, step, total, ensure, getTtsText, ttsVoiceURI, ttsRate, highlightTtsSentence, onProgress, getTts, clearTtsMarks],
+  );
+
+  useEffect(() => {
+    startTtsRef.current = startTts;
+  });
+
+  const toggleTtsPause = useCallback(() => {
+    const eng = getTts();
+    if (ttsState === "playing") {
+      eng.pause();
+      setTtsState("paused");
+    } else if (ttsState === "paused") {
+      eng.resume();
+      setTtsState("playing");
+    }
+  }, [ttsState, getTts]);
 
   /** Trang nào đang lật (bên trái hay phải), theo chiều lật + RTL. */
   const turningSlot = useCallback(
@@ -424,6 +614,8 @@ export default function Reader({
       if (busyRef.current) return;
       const next = cur + dir * step;
       if (next < 0 || next >= total) return;
+      // Lật tay thì dừng TTS (trừ lúc TTS tự lật sang trang sau).
+      if (!ttsAutoRef.current) stopTtsRef.current();
       busyRef.current = true;
       const slot = turningSlot(dir);
       try {
@@ -598,6 +790,10 @@ export default function Reader({
       if (e.key === "ArrowRight") void commit(rtl ? -1 : 1);
       else if (e.key === "ArrowLeft") void commit(rtl ? 1 : -1);
       else if (e.key === "f" || e.key === "F") toggleFullscreen();
+      else if (e.key === "t" || e.key === "T") {
+        if (ttsState === "playing" || ttsState === "paused") stopTts();
+        else void startTts();
+      }
       else if (e.key === "Escape") {
         if (panel !== "none") setPanel("none");
         else if (showCrop) setShowCrop(false);
@@ -612,7 +808,7 @@ export default function Reader({
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [commit, rtl, panel, showCrop, pendingSelection, toggleBookmark]);
+  }, [commit, rtl, panel, showCrop, pendingSelection, toggleBookmark, ttsState, startTts, stopTts]);
 
   const toggleFullscreen = () => {
     if (document.fullscreenElement) {
@@ -808,7 +1004,75 @@ export default function Reader({
         <button onClick={() => setPanel((p) => (p === "grid" ? "none" : "grid"))}>
           🗂 Lưới trang (G)
         </button>
+        <button onClick={() => setTtsOpen((v) => !v)} title="Đọc thành tiếng (phím T)">
+          🔊 Đọc thành tiếng{ttsState !== "idle" ? " ▶" : ""}
+        </button>
+        <button onClick={() => setDictOpen((v) => !v)}>📖 Từ điển</button>
       </header>
+
+      {ttsOpen && (
+        <div className="tts-bar">
+          {!ttsAvailable ? (
+            <span>
+              Đọc thành tiếng chỉ dùng cho sách chữ (EPUB/MOBI) và PDF có lớp
+              chữ — truyện ảnh không có chữ để đọc.
+            </span>
+          ) : (
+            <>
+              <button onClick={() => void startTts()} disabled={ttsState === "playing"}>
+                ▶ Đọc từ trang này
+              </button>
+              <button onClick={toggleTtsPause} disabled={ttsState === "idle"}>
+                {ttsState === "paused" ? "▶ Tiếp tục" : "⏸ Tạm dừng"}
+              </button>
+              <button onClick={stopTts} disabled={ttsState === "idle"}>
+                ⏹ Dừng
+              </button>
+              <label>
+                Tốc độ:{" "}
+                <select value={ttsRate} onChange={(e) => setTtsRate(Number(e.target.value))}>
+                  <option value={0.75}>0.75×</option>
+                  <option value={1}>1×</option>
+                  <option value={1.25}>1.25×</option>
+                  <option value={1.5}>1.5×</option>
+                  <option value={2}>2×</option>
+                </select>
+              </label>
+              <label>
+                Giọng:{" "}
+                <select
+                  value={ttsVoiceURI ?? ""}
+                  onChange={(e) => {
+                    const v = e.target.value || null;
+                    setTtsVoiceURI(v);
+                    try {
+                      if (v) localStorage.setItem("mio-tts-voice", v);
+                      else localStorage.removeItem("mio-tts-voice");
+                    } catch {
+                      // Bỏ qua lỗi lưu.
+                    }
+                  }}
+                >
+                  <option value="">Mặc định hệ thống</option>
+                  {ttsVoices.map((v) => (
+                    <option key={v.voiceURI} value={v.voiceURI}>
+                      {v.name} ({v.lang})
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </>
+          )}
+          {ttsMsg && <span className="muted">{ttsMsg}</span>}
+          <span className="muted">
+            Giọng đọc lấy từ Windows — máy chưa cài giọng Việt thì chỉ có
+            giọng Anh. Đọc hết trang thì tự lật sang trang sau. Sách chữ tô
+            cam câu đang đọc; PDF chỉ đọc tiếng, không tô câu.
+          </span>
+        </div>
+      )}
+
+      {dictOpen && <DictionaryBox word={dictWord} onWordChange={setDictWord} />}
 
       <div className="reader-bar tools-bar">
         <button onClick={() => setZoom((z) => clampZoom(z / 1.2))} title="Thu nhỏ (-)">
@@ -893,6 +1157,16 @@ export default function Reader({
             placeholder="Ghi chú (tùy chọn)"
           />
           <button onClick={() => void saveHighlight()}>Lưu gạch chân</button>
+          <button
+            onClick={() => {
+              const words = pendingSelection.text.trim().split(/\s+/);
+              const w = words.length <= 2 ? pendingSelection.text.trim() : words[0];
+              setDictWord(w);
+              setDictOpen(true);
+            }}
+          >
+            📖 Tra từ
+          </button>
           <button
             onClick={() => {
               setPendingSelection(null);
@@ -1007,6 +1281,7 @@ export default function Reader({
           value={cur}
           onChange={(e) => {
             const n = Number(e.target.value);
+            stopTtsRef.current();
             void ensure([n, n + 1]);
             setSpread(Math.floor(n / step) * step);
             onProgress(n, total);
@@ -1018,8 +1293,9 @@ export default function Reader({
       </footer>
       <p className="hint">
         Kéo chuột từ mép trang để lật như tay cầm sách • ← → lật trang • F toàn
-        màn hình • B đánh dấu • Ctrl+F tìm • G lưới trang • +/− zoom • Esc thoát
-        {isTextBook ? " • Sách chữ: kéo chuột để bôi đen rồi gạch chân" : ""}
+        màn hình • B đánh dấu • Ctrl+F tìm • G lưới trang • +/− zoom • T đọc
+        thành tiếng • Esc thoát
+        {isTextBook ? " • Sách chữ: kéo chuột để bôi đen rồi gạch chân / tra từ" : ""}
         {zoomedBeyondFit ? " • Đang zoom: kéo chuột để rê trang" : ""}
       </p>
     </div>

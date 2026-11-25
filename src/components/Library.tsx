@@ -1,32 +1,45 @@
 import { useState } from "react";
-import type { BookMeta, HistoryEntry } from "../types";
+import type { BookMeta, HistoryEntry, StatsPerBook, StatsSummary } from "../types";
+import StatsView from "./StatsView";
+import OpdsPanel from "./OpdsPanel";
 
 interface Props {
   history: HistoryEntry[];
   localBooks: BookMeta[];
+  statsSummary: StatsSummary | null;
+  statsPerBook: StatsPerBook[];
   onOpenLocal: (b: BookMeta) => void;
   onResume: (h: HistoryEntry) => void;
   onRelink: (h: HistoryEntry) => void;
   onRemoveHistory: (id: string) => void;
   onPickFile: () => void;
   onPickFolder: () => void;
+  /** Mở 1 cuốn đã tải từ OPDS về máy (đọc như file local). */
+  onOpenDownloaded: (path: string) => void;
 }
 
 export default function Library({
   history,
   localBooks,
+  statsSummary,
+  statsPerBook,
   onOpenLocal,
   onResume,
   onRelink,
   onRemoveHistory,
   onPickFile,
   onPickFolder,
+  onOpenDownloaded,
 }: Props) {
   const [filter, setFilter] = useState("");
   const q = filter.trim().toLowerCase();
   const match = (t: string) => !q || t.toLowerCase().includes(q);
   const reading = history.filter((h) => h.status !== "done" && match(h.title));
   const books = localBooks.filter((b) => match(b.name));
+  const resumeById = (bookId: string) => {
+    const h = history.find((x) => x.id === bookId);
+    if (h) void onResume(h);
+  };
   return (
     <div className="library">
       <p>
@@ -96,6 +109,9 @@ export default function Library({
           ))}
         </ul>
       </section>
+
+      <StatsView summary={statsSummary} perBook={statsPerBook} onResume={resumeById} />
+      <OpdsPanel onOpenDownloaded={onOpenDownloaded} />
     </div>
   );
 }
