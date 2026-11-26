@@ -196,6 +196,20 @@ không có đọc manga phải → trái. Bản này sửa cả 3 + làm lại g
   không, lật còn ngược không (nhất là truyện ảnh CBZ), manga lật đúng
   chiều + đúng trang chưa, menu mở/đóng có mượt không.
 
+### v0.3.2 — CBZ lớn (~300MB) hết đơ + lật trang mượt (26/11/2026)
+Thiện báo: mở file CBZ tầm 300MB thì app đơ cứng, Windows hiện "Mio Reader
+is not responding"; lật trang lag giật. Nguyên nhân chính ở backend Rust:
+mỗi lần nạp 1 trang (`cbz_page`) đều chạy lại toàn bộ `cbz_index` — mở file,
+`by_index` từng entry, sắp xếp lại — rồi mới giải nén trang đó; mở sách là
+4 lần quét, mỗi lần lật lại quét thêm, bìa/lưới cũng quét ké. Trên ổ chậm
+là đơ cứng. Sửa: cache chỉ mục CBZ theo (đường dẫn, kích thước, thời gian
+sửa) trong AppState (tối đa 8 file), `cbz_page` dùng cache + `by_index`
+thẳng tới entry — mỗi trang chỉ còn 1 lần mở file + 1 lần giải nén. Ngoài
+ra `downscaleDataUrl` (thumbnail lưới trang) chuyển sang createImageBitmap
+resize ngoài luồng chính, có fallback về img+canvas nếu không hỗ trợ.
+Không đổi hành vi đọc sách nào khác; lật trang vẫn chờ nạp + giải mã spread
+đích trước khi lật (giờ đã nhanh vì hết quét lại file).
+
 ### v0.3.1 — sửa lỗi bìa "Tiếp tục đọc" nuốt cả app (26/11/2026)
 Thiện cài v0.3.0, mở app lên thấy 1 trang truyện (bìa Bloody Monday) chiếm
 hết cửa sổ, không bấm được gì, không thoát được. Nguyên nhân: ảnh bìa trong
