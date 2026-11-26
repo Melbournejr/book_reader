@@ -22,6 +22,8 @@ function telegramLoadError(e: unknown): string {
 
 interface Props {
   onOpenTelegramBook: (f: TelegramFile, client: TelegramClient) => void;
+  /** Báo cho màn Nguồn sách biết đã kết nối (để chấm xanh trên thẻ). */
+  onConnectedChange?: (connected: boolean) => void;
 }
 
 /**
@@ -30,7 +32,7 @@ interface Props {
  * Credential lưu mã hóa AES-GCM bằng passphrase của họ, không hardcode,
  * không gửi lên GitHub, không gửi cho ai.
  */
-export default function TelegramPanel({ onOpenTelegramBook }: Props) {
+export default function TelegramPanel({ onOpenTelegramBook, onConnectedChange }: Props) {
   const [apiId, setApiId] = useState("");
   const [apiHash, setApiHash] = useState("");
   const [passphrase, setPassphrase] = useState("");
@@ -104,6 +106,7 @@ export default function TelegramPanel({ onOpenTelegramBook }: Props) {
     const list = await tg.listSavedMessages(c, 100);
     setFiles(list);
     setStatus(`Tìm thấy ${list.length} file sách trong Saved Messages.`);
+    onConnectedChange?.(true);
   };
 
   return (

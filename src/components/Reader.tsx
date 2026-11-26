@@ -37,7 +37,16 @@ import type {
   ReaderSettings,
   SearchResult,
 } from "../types";
-import ReaderPanels, { type PanelTab } from "./ReaderPanels";
+import {
+  BookmarksSheet,
+  GridSheet,
+  HighlightsSheet,
+  MenuSheet,
+  SearchSheet,
+  TypoSheet,
+  type SheetKind,
+} from "./ReaderSheets";
+import { isComicFormat } from "../lib/spread";
 
 export interface ReaderPage {
   /** Ảnh (data URL) hoặc HTML chương EPUB. */
@@ -92,6 +101,10 @@ interface Props {
   jumpRequest: JumpRequest | null;
   /** P2: text từng trang PDF (từ pdf.js) để TTS đọc; EPUB/MOBI tự bóc từ chương. */
   ttsTextForPage?: (page: number) => Promise<string | null>;
+  /** Thông tin sách cho menu ⋯, vd "EPUB · 2,4 MB" (App tính sẵn). */
+  bookInfo: string;
+  /** Menu ⋯ > Thống kê đọc: đóng sách rồi mở màn Thống kê (App xử lý). */
+  onOpenStats: () => void;
 }
 
 const HL_COLORS = [
@@ -127,20 +140,28 @@ export default function Reader({
   initialSettings,
   jumpRequest,
   ttsTextForPage,
+  bookInfo,
+  onOpenStats,
 }: Props) {
   const isTextBook = format === "epub" || format === "mobi";
+  const isComic = isComicFormat(format);
   const ttsAvailable = isTextBook || format === "pdf";
   // Chế độ đọc của cuốn này: cài đặt đã lưu thắng, chưa lưu thì lấy mặc
   // định chung của App (checkbox Manga ở thư viện). Đổi trong menu (⋯)
   // thì nhớ theo từng cuốn.
   const initTwoPage = initialSettings?.twoPage ?? true;
-  const initRtl = initialSettings?.rtl ?? rtlDefault;
+  // Chiều đọc: App đã giải quyết xong (cài đặt riêng > auto-RTL truyện
+  // tranh > mặc định chung) qua resolveInitialRtl — Reader dùng thẳng
+  // giá trị này, không tự tính lại.
+  const initRtl = rtlDefault;
   const [spread, setSpread] = useState(() =>
     spreadStartForPage(startPage, initTwoPage, initRtl, total),
   );
   const [twoPage, setTwoPage] = useState(initTwoPage);
   const [rtl, setRtl] = useState(initRtl);
-  const [flipOn, setFlipOn] = useState(true);
+  // Hiệu ứng lật trang luôn bật (v0.3.0: menu thiết kế không có công tắc
+  // này nữa; giữ biến để logic commit/drag không đổi).
+  const flipOn = true;
   // ---- v0.2.0: chế độ đọc toàn màn hình "chìm" (immersive) ----
   // Chỉ còn trang sách + thanh tiến độ mỏng + cụm nút nổi (tự ẩn sau
   // ~2.5s không cử động chuột). Trạng thái này KHÔNG phụ thuộc vào
@@ -148,14 +169,23 @@ export default function Reader({
   // hết chrome như thường (fallback đã kiểm bằng code, xem README).
   const [immersive, setImmersive] = useState(false);
   const [controlsVisible, setControlsVisible] = useState(true);
-  const [menuOpen, setMenuOpen] = useState(false);
   const idleTimerRef = useRef<number | null>(null);
+  // ---- v0.3.0: sheet trượt phải thay cho menu thả xuống + panel bên ----
+  // 1 sheet mở tại 1 thời điểm: menu ⋯ / chữ & nền / tìm / lưới / đánh dấu / gạch chân.
+  const [sheet, setSheet] = useState<SheetKind>(null);
+  // Toast nổi dưới màn hình (xác nhận thao tác trong menu, lỗi TTS...).
+  const [toast, setToast] = useState<string | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
+  const showToast = useCallback((msg: string) => {
+    setToast(msg);
+    if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = window.setTimeout(() => setToast(null), 2600);
+  }, []);
   // Trong lúc lật, nền hiển thị spread đích để lá lật xong là khớp, không giật.
   const [curlTarget, setCurlTarget] = useState<number | null>(null);
   const [, setCacheVersion] = useState(0);
 
-  // ---- P1: panel bên phải ----
-  const [panel, setPanel] = useState<PanelTab | "none">("none");
+  // ---- v0.3.0: sheet trượt phải (menu ⋯ + các bảng) ----
   const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
   const [highlights, setHighlights] = useState<Highlight[]>([]);
 
@@ -165,9 +195,17 @@ export default function Reader({
   const [vpSize, setVpSize] = useState({ w: 1200, h: 700 });
   const [baseH, setBaseH] = useState(600);
 
+  // ---- v0.3.0: chữ & nền trang (sách chữ) — nhớ theo từng cuốn ----
+  const [fontSize, setFontSize] = useState(initialSettings?.fontSize ?? 15.5);
+  const [lineHeight, setLineHeight] = useState(initialSettings?.lineHeight ?? 1.78);
+  const [fontSans, setFontSans] = useState(initialSettings?.fontSans ?? false);
+  const [pageTheme, setPageTheme] = useState<"light" | "paper" | "night">(
+    initialSettings?.pageTheme ?? "light",
+  );
+
   // ---- P1: cắt lề (chỉ trang ảnh) ----
   const [crop, setCrop] = useState<CropMargins>(initialSettings?.crop ?? NO_CROP);
-  const [showCrop, setShowCrop] = useState(false);
+  const [cropAuto, setCropAuto] = useState(() => hasCrop(initialSettings?.crop ?? NO_CROP));
   const [cropBusy, setCropBusy] = useState(false);
   const [cropMsg, setCropMsg] = useState("");
 
@@ -191,7 +229,6 @@ export default function Reader({
   const [hlNote, setHlNote] = useState("");
 
   // ---- P2: đọc thành tiếng (TTS) + từ điển ----
-  const [ttsOpen, setTtsOpen] = useState(false);
   const [ttsState, setTtsState] = useState<TtsState>("idle");
   const [ttsRate, setTtsRate] = useState(1);
   const [ttsVoiceURI, setTtsVoiceURI] = useState<string | null>(() => {
@@ -241,15 +278,9 @@ export default function Reader({
   const settingsSavedRef = useRef(false);
 
   // ---- v0.2.0: toàn màn hình "chìm" ----
-  const menuOpenRef = useRef(false);
-  useEffect(() => {
-    menuOpenRef.current = menuOpen;
-  }, [menuOpen]);
   const pokeControls = useCallback(() => {
     setControlsVisible(true);
     if (idleTimerRef.current) window.clearTimeout(idleTimerRef.current);
-    // Menu đang mở thì đừng tự ẩn cụm nút (người đọc còn đang chọn).
-    if (menuOpenRef.current) return;
     idleTimerRef.current = window.setTimeout(() => setControlsVisible(false), 2500);
   }, []);
   // Cử động chuột thì hiện cụm nút nổi, để yên ~2.5s thì tự ẩn.
@@ -296,7 +327,7 @@ export default function Reader({
   }, []);
   const exitImmersive = useCallback(async () => {
     setImmersive(false);
-    setMenuOpen(false);
+    setSheet(null);
     if (document.fullscreenElement) {
       try {
         await document.exitFullscreen();
@@ -392,7 +423,7 @@ export default function Reader({
     void refreshHighlights();
   }, [refreshBookmarks, refreshHighlights]);
 
-  // ---- Lưu cài đặt riêng cuốn này (zoom/fit/crop/2-trang/manga), debounce 500ms ----
+  // ---- Lưu cài đặt riêng cuốn này (zoom/fit/crop/2-trang/manga/chữ/nền), debounce 500ms ----
   useEffect(() => {
     if (!settingsSavedRef.current) {
       settingsSavedRef.current = true;
@@ -400,11 +431,14 @@ export default function Reader({
     }
     const t = setTimeout(() => {
       void api
-        .historySettingsSave(bookId, JSON.stringify({ zoom, fit, crop, twoPage, rtl }))
+        .historySettingsSave(
+          bookId,
+          JSON.stringify({ zoom, fit, crop, twoPage, rtl, fontSize, lineHeight, fontSans, pageTheme }),
+        )
         .catch(() => {});
     }, 500);
     return () => clearTimeout(t);
-  }, [zoom, fit, crop, twoPage, rtl, bookId]);
+  }, [zoom, fit, crop, twoPage, rtl, fontSize, lineHeight, fontSans, pageTheme, bookId]);
 
   const ensure = useCallback(
     async (indices: number[]): Promise<void> => {
@@ -464,8 +498,7 @@ export default function Reader({
       void ensure([n, n + 1]);
       setSpread(spreadStartForPage(n, twoPage, rtl, total));
       onProgress(n, total);
-      setPanel("none");
-      setMenuOpen(false);
+      setSheet(null);
     },
     [total, twoPage, rtl, ensure, onProgress],
   );
@@ -667,6 +700,28 @@ export default function Reader({
     }
   }, [ttsState, getTts]);
 
+  /** Bật/tắt đọc thành tiếng: nút 🔊 trên thanh pill, phím T, menu ⋯. */
+  const toggleTts = useCallback(() => {
+    if (!ttsAvailable) {
+      showToast(
+        "Đọc thành tiếng chỉ dùng cho sách chữ (EPUB/MOBI) và PDF có lớp chữ — truyện ảnh không có chữ để đọc.",
+      );
+      return;
+    }
+    if (ttsState === "playing" || ttsState === "paused") stopTts();
+    else void startTts();
+  }, [ttsAvailable, ttsState, stopTts, startTts, showToast]);
+  const toggleTtsRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    toggleTtsRef.current = toggleTts;
+  });
+
+  // Lỗi TTS (trang không có chữ...) thì báo bằng toast thay vì thanh riêng.
+  useEffect(() => {
+    if (ttsMsg && ttsState === "idle") showToast(ttsMsg);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ttsMsg]);
+
   /** Ghi tư thế lá lật thẳng vào DOM (không render lại React).
    * `spineLeft` = gáy lá nằm bên trái: lá xoay quanh mép trái, góc âm.
    * Ngược lại xoay quanh mép phải, góc dương. */
@@ -760,6 +815,7 @@ export default function Reader({
     try {
       if (existing) {
         await api.bookmarkDelete(existing.id);
+        showToast("Đã bỏ đánh dấu trang này.");
       } else {
         const label = cacheRef.current.get(cur)?.label ?? `Trang ${cur + 1}`;
         await api.bookmarkAdd({
@@ -769,31 +825,13 @@ export default function Reader({
           note: null,
           created_at: Date.now(),
         });
+        showToast(`Đã đánh dấu trang ${cur + 1}.`);
       }
       await refreshBookmarks();
     } catch {
       // Lưu bookmark lỗi thì kệ, không chặn việc đọc.
     }
-  }, [bookmarks, cur, bookId, refreshBookmarks]);
-
-  const addBookmarkWithLabel = useCallback(
-    async (label: string) => {
-      const pageLabel = cacheRef.current.get(cur)?.label ?? `Trang ${cur + 1}`;
-      try {
-        await api.bookmarkAdd({
-          book_id: bookId,
-          page: cur,
-          chapter: pageLabel,
-          note: label,
-          created_at: Date.now(),
-        });
-        await refreshBookmarks();
-      } catch {
-        // Bỏ qua lỗi lưu.
-      }
-    },
-    [cur, bookId, refreshBookmarks],
-  );
+  }, [bookmarks, cur, bookId, refreshBookmarks, showToast]);
 
   // ---- Tìm trong sách ----
   const runSearch = useCallback(async () => {
@@ -826,7 +864,7 @@ export default function Reader({
       // PDF: App vẽ highlight vàng lên trang rồi báo nhảy qua jumpRequest.
       if (r.rects && r.rects.length > 0 && searchApi.onJump) {
         searchApi.onJump(r);
-        setPanel("none");
+        setSheet(null);
         return;
       }
       jumpTo(r.page);
@@ -858,7 +896,7 @@ export default function Reader({
     setPendingSelection(null);
     setHlNote("");
     window.getSelection()?.removeAllRanges();
-    setPanel("highlights");
+    setSheet("highlights");
   }, [pendingSelection, hlColor, hlNote, bookId, refreshHighlights]);
 
   // ---- Cắt lề: tự phát hiện lề trắng trên trang ảnh đang đọc ----
@@ -883,13 +921,12 @@ export default function Reader({
     }
   }, [left, right]);
 
-  // Mở 1 tab bảng bên (đánh dấu/tìm/lưới/gạch chân). Đang đọc chìm thì
-  // thoát chìm trước — bảng bên cần không gian, không chen vào trang đọc.
-  const openPanel = useCallback(
-    (tab: PanelTab) => {
-      setMenuOpen(false);
+  // Mở 1 sheet trượt phải (menu ⋯ / tìm / lưới / ...). Đang đọc chìm thì
+  // thoát chìm trước — sheet cần không gian, không chen vào trang đọc.
+  const openSheet = useCallback(
+    (kind: Exclude<SheetKind, null>) => {
       if (immersive) void exitImmersive();
-      setPanel(tab);
+      setSheet(kind);
     },
     [immersive, exitImmersive],
   );
@@ -902,7 +939,7 @@ export default function Reader({
       if (e.repeat) return;
       if ((e.ctrlKey || e.metaKey) && (e.key === "f" || e.key === "F")) {
         e.preventDefault();
-        openPanel("search");
+        openSheet("search");
         return;
       }
       if (e.key === "ArrowRight") void commit(rtl ? -1 : 1);
@@ -911,21 +948,16 @@ export default function Reader({
         if (immersive) void exitImmersive();
         else void enterImmersive();
       }
-      else if (e.key === "t" || e.key === "T") {
-        if (ttsState === "playing" || ttsState === "paused") stopTts();
-        else void startTts();
-      }
+      else if (e.key === "t" || e.key === "T") toggleTtsRef.current();
       else if (e.key === "Escape") {
-        if (menuOpen) setMenuOpen(false);
-        else if (panel !== "none") setPanel("none");
+        if (sheet !== null) setSheet(null);
         else if (immersive) void exitImmersive();
-        else if (showCrop) setShowCrop(false);
         else if (pendingSelection) setPendingSelection(null);
         else onClose();
       } else if (e.key === "b" || e.key === "B") void toggleBookmark();
       else if (e.key === "g" || e.key === "G") {
-        if (panel === "grid") setPanel("none");
-        else openPanel("grid");
+        if (sheet === "grid") setSheet(null);
+        else openSheet("grid");
       }
       else if (e.key === "+" || e.key === "=") setZoom((z) => clampZoom(z * 1.2));
       else if (e.key === "-") setZoom((z) => clampZoom(z / 1.2));
@@ -934,7 +966,7 @@ export default function Reader({
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [commit, rtl, panel, menuOpen, immersive, showCrop, pendingSelection, toggleBookmark, ttsState, startTts, stopTts, openPanel]);
+  }, [commit, rtl, sheet, immersive, pendingSelection, toggleBookmark, openSheet]);
 
   const toggleImmersive = () => {
     if (immersive) void exitImmersive();
@@ -1079,17 +1111,21 @@ export default function Reader({
       <div className="page-face" style={mirrored ? { transform: "scaleX(-1)" } : undefined}>
         {p.isImage ? (
           <img
+            className="page-img"
             src={p.content}
             alt={p.label}
             draggable={false}
             style={cropActive ? cropImgStyle(crop) : undefined}
           />
         ) : (
-          <div
-            className="epub-page"
-            data-page={pageIndex}
-            dangerouslySetInnerHTML={{ __html: p.content }}
-          />
+          <>
+            <div
+              className="epub-page"
+              data-page={pageIndex}
+              dangerouslySetInnerHTML={{ __html: p.content }}
+            />
+            <div className="page-num">Trang {pageIndex + 1}</div>
+          </>
         )}
       </div>
     );
@@ -1118,214 +1154,86 @@ export default function Reader({
 
   return (
     <div
-      className={`reader${immersive ? " is-immersive" : ""}${immersive && !controlsVisible ? " controls-hidden" : ""}`}
+      className={`reader${immersive ? " immersive" : ""}${immersive && !controlsVisible ? " hideui" : ""}`}
     >
-      {menuOpen && <div className="menu-backdrop" onClick={() => setMenuOpen(false)} />}
-      <header className="reader-bar reader-top">
-        <button onClick={onClose} title="Về thư viện (Esc)">
-          ← Thư viện
+      {/* Thanh trên theo thiết kế: nút quay lại + pill chứa tiêu đề & 5 nút
+          tác vụ hàng ngày (đánh dấu, tìm, Aa, đọc thành tiếng, toàn màn
+          hình) + nút ⋯ mở menu duy nhất chứa mọi tính năng phụ. */}
+      <header className="rbar">
+        <button className="back-btn" onClick={onClose} title="Về thư viện (Esc)">
+          ←
         </button>
-        <strong className="reader-title">{title}</strong>
-        <span className="page-label">
-          {cur + 1}
-          {twoPage && shownSides.left !== null && shownSides.right !== null
-            ? `–${cur + 2}`
-            : ""}{" "}
-          / {total}
-          {bookmarkedHere ? " ★" : ""}
-        </span>
-        <button
-          onClick={() => {
-            setMenuOpen((v) => !v);
-            pokeControls();
-          }}
-          title="Menu — mọi tính năng ở đây"
-          aria-expanded={menuOpen}
-        >
-          ⋯ Menu
-        </button>
-        <button onClick={toggleImmersive} title="Đọc toàn màn hình (phím F)">
-          {immersive ? "⛶ Thoát toàn màn hình" : "⛶ Toàn màn hình (F)"}
-        </button>
-        {menuOpen && (
-          <div className="reader-menu" role="menu">
-              <div className="menu-section">Chế độ đọc</div>
-              <button onClick={toggleTwoPage}>
-                {twoPage ? "▦ 2 trang ✓" : "▤ 1 trang"}
-              </button>
-              <button onClick={toggleRtl}>
-                Manga phải → trái{rtl ? " ✓" : ""}
-              </button>
-              <button onClick={() => setFlipOn((v) => !v)}>
-                Hiệu ứng lật trang: {flipOn ? "Bật" : "Tắt"}
-              </button>
-              <button onClick={toggleImmersive}>
-                ⛶ Toàn màn hình (F){immersive ? " ✓" : ""}
-              </button>
-              <div className="menu-section">Công cụ</div>
-              <button onClick={() => void toggleBookmark()}>
-                ★ Đánh dấu trang này (B){bookmarkedHere ? " ✓" : ""}
-              </button>
-              <button onClick={() => openPanel("bookmarks")}>★ Danh sách đánh dấu</button>
-              <button onClick={() => openPanel("search")}>🔍 Tìm trong sách (Ctrl+F)</button>
-              <button onClick={() => openPanel("grid")}>🗂 Lưới trang (G)</button>
-              <button onClick={() => openPanel("highlights")}>✏️ Gạch chân</button>
-              <button
-                onClick={() => {
-                  setTtsOpen((v) => !v);
-                  setMenuOpen(false);
-                }}
-              >
-                🔊 Đọc thành tiếng (T){ttsState !== "idle" ? " ▶" : ""}
-              </button>
-              <button
-                onClick={() => {
-                  setDictOpen((v) => !v);
-                  setMenuOpen(false);
-                }}
-              >
-                📖 Từ điển
-              </button>
-              <button
-                onClick={() => {
-                  setShowCrop((v) => !v);
-                  setMenuOpen(false);
-                }}
-              >
-                ✂️ Cắt lề{hasCrop(crop) ? " ✓" : ""}
-              </button>
-              <div className="menu-section">Zoom &amp; vừa trang</div>
-              <div className="menu-zoom">
-                <button onClick={() => setZoom((z) => clampZoom(z / 1.2))} title="Thu nhỏ (-)">
-                  −
-                </button>
-                <span>{Math.round(scale * 100)}%</span>
-                <button onClick={() => setZoom((z) => clampZoom(z * 1.2))} title="Phóng to (+)">
-                  +
-                </button>
-                <button onClick={() => setZoom(1)} title="Về 100% (phím 0)">
-                  100%
-                </button>
-                <select
-                  value={fit}
-                  onChange={(e) => setFit(e.target.value as "page" | "width" | "height")}
-                  title="Vừa trang"
-                >
-                  <option value="page">Vừa trang</option>
-                  <option value="width">Vừa rộng</option>
-                  <option value="height">Vừa cao</option>
-                </select>
-              </div>
-              {zoomedBeyondFit && (
-                <div className="menu-note">
-                  Đang zoom: kéo chuột để rê trang, lật bằng nút ← →.
-                </div>
-              )}
-              <div className="menu-section">Phím tắt</div>
-              <div className="menu-note">
-                ← → lật trang • F toàn màn hình • B đánh dấu • Ctrl+F tìm • G
-                lưới trang • +/− zoom • 0 về 100% • T đọc thành tiếng • Esc
-                thoát
-                {isTextBook
-                  ? " • Sách chữ: kéo chuột bôi đen để gạch chân / tra từ"
-                  : ""}
-              </div>
+        <div className="rbar-pill">
+          <div className="rbar-title">
+            <div className="t">{title}</div>
+            <div className="s">
+              Trang {cur + 1}
+              {twoPage && shownSides.left !== null && shownSides.right !== null
+                ? `–${cur + 2}`
+                : ""}{" "}
+              / {total}
+              {bookmarkedHere ? " · ★" : ""}
+              {isComic && rtl ? " · RTL" : ""}
             </div>
-        )}
+          </div>
+          <button
+            className={`rbtn${bookmarkedHere ? " on" : ""}`}
+            onClick={() => void toggleBookmark()}
+            title="Đánh dấu trang (B)"
+          >
+            🔖
+          </button>
+          <button className="rbtn" onClick={() => openSheet("search")} title="Tìm trong sách (Ctrl+F)">
+            ⌕
+          </button>
+          <button className="rbtn" onClick={() => openSheet("typo")} title="Chữ & nền trang">
+            Aa
+          </button>
+          <button
+            className={`rbtn${ttsState !== "idle" ? " on" : ""}`}
+            onClick={toggleTts}
+            title="Đọc thành tiếng (T)"
+          >
+            🔊
+          </button>
+          <button className="rbtn" onClick={toggleImmersive} title="Đọc toàn màn hình (F)">
+            ⛶
+          </button>
+          <button className="rbtn" onClick={() => openSheet("menu")} title="Menu — mọi tính năng ở đây">
+            ⋯
+          </button>
+        </div>
       </header>
 
-      {ttsOpen && (
-        <div className="tts-bar">
-          {!ttsAvailable ? (
-            <span>
-              Đọc thành tiếng chỉ dùng cho sách chữ (EPUB/MOBI) và PDF có lớp
-              chữ — truyện ảnh không có chữ để đọc.
-            </span>
-          ) : (
-            <>
-              <button onClick={() => void startTts()} disabled={ttsState === "playing"}>
-                ▶ Đọc từ trang này
-              </button>
-              <button onClick={toggleTtsPause} disabled={ttsState === "idle"}>
-                {ttsState === "paused" ? "▶ Tiếp tục" : "⏸ Tạm dừng"}
-              </button>
-              <button onClick={stopTts} disabled={ttsState === "idle"}>
-                ⏹ Dừng
-              </button>
-              <label>
-                Tốc độ:{" "}
-                <select value={ttsRate} onChange={(e) => setTtsRate(Number(e.target.value))}>
-                  <option value={0.75}>0.75×</option>
-                  <option value={1}>1×</option>
-                  <option value={1.25}>1.25×</option>
-                  <option value={1.5}>1.5×</option>
-                  <option value={2}>2×</option>
-                </select>
-              </label>
-              <label>
-                Giọng:{" "}
-                <select
-                  value={ttsVoiceURI ?? ""}
-                  onChange={(e) => {
-                    const v = e.target.value || null;
-                    setTtsVoiceURI(v);
-                    try {
-                      if (v) localStorage.setItem("mio-tts-voice", v);
-                      else localStorage.removeItem("mio-tts-voice");
-                    } catch {
-                      // Bỏ qua lỗi lưu.
-                    }
-                  }}
-                >
-                  <option value="">Mặc định hệ thống</option>
-                  {ttsVoices.map((v) => (
-                    <option key={v.voiceURI} value={v.voiceURI}>
-                      {v.name} ({v.lang})
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </>
-          )}
-          {ttsMsg && <span className="muted">{ttsMsg}</span>}
-          <span className="muted">
-            Giọng đọc lấy từ Windows — máy chưa cài giọng Việt thì chỉ có
-            giọng Anh. Đọc hết trang thì tự lật sang trang sau. Sách chữ tô
-            cam câu đang đọc; PDF chỉ đọc tiếng, không tô câu.
+      {/* Thanh đọc thành tiếng nổi (thiết kế v0.3.0): nút tạm dừng, vạch
+          sóng, trạng thái, nút dừng. Giọng & tốc độ nằm trong menu ⋯. */}
+      {ttsState !== "idle" && (
+        <div className="ttsbar">
+          <button onClick={toggleTtsPause} title={ttsState === "paused" ? "Tiếp tục đọc" : "Tạm dừng"}>
+            {ttsState === "paused" ? "▶" : "⏸"}
+          </button>
+          <span className={`eq${ttsState === "paused" ? " paused" : ""}`}>
+            <i />
+            <i />
+            <i />
+            <i />
           </span>
+          <span className="tts-txt">{ttsMsg || "Đang đọc…"}</span>
+          <button onClick={stopTts} title="Dừng đọc">
+            ⏹
+          </button>
         </div>
       )}
 
-      {dictOpen && <DictionaryBox word={dictWord} onWordChange={setDictWord} />}
-
-      {showCrop && (
-        <div className="crop-bar">
-          <button onClick={() => void autoDetectCrop()} disabled={cropBusy}>
-            {cropBusy ? "Đang quét…" : "Tự phát hiện lề trắng"}
-          </button>
-          {(["top", "right", "bottom", "left"] as const).map((side) => (
-            <label key={side}>
-              {side === "top" ? "Trên" : side === "right" ? "Phải" : side === "bottom" ? "Dưới" : "Trái"}{" "}
-              {crop[side]}%
-              <input
-                type="range"
-                min={0}
-                max={40}
-                value={crop[side]}
-                onChange={(e) => setCrop((c) => clampCrop({ ...c, [side]: Number(e.target.value) }))}
-              />
-            </label>
-          ))}
-          <button
-            onClick={() => {
-              setCrop(NO_CROP);
-              setCropMsg("");
-            }}
-          >
-            Xóa cắt lề
-          </button>
-          <span className="muted">Chỉ cắt lúc hiển thị trang ảnh, không sửa file gốc.</span>
-          {cropMsg && <span className="muted">{cropMsg}</span>}
+      {dictOpen && (
+        <div className="dict-float">
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+            <strong>Tra từ điển</strong>
+            <button onClick={() => setDictOpen(false)} aria-label="Đóng từ điển">
+              ✕
+            </button>
+          </div>
+          <DictionaryBox word={dictWord} onWordChange={setDictWord} />
         </div>
       )}
 
@@ -1376,41 +1284,75 @@ export default function Reader({
       )}
 
       <div className="reader-body">
+        {/* Vùng bấm lật ở 2 mép (thiết kế): dải hẹp ngoài spread, không che
+            vùng kéo lật giữa trang. Trái = lùi, phải = tới (RTL đảo lại). */}
+        <button
+          className="nav-zone left"
+          onClick={() => void commit(rtl ? 1 : -1)}
+          disabled={cur <= 0}
+          aria-label="Trang trước"
+        >
+          ‹
+        </button>
+        <button
+          className="nav-zone right"
+          onClick={() => void commit(rtl ? -1 : 1)}
+          disabled={nextSpread === null}
+          aria-label="Trang sau"
+        >
+          ›
+        </button>
+        {/* Tag truyện tranh theo thiết kế: "Trang 98 / 214 · RTL". */}
+        {isComic && (
+          <div className="mtag">
+            Trang {cur + 1} / {total}
+            {rtl ? " · RTL" : ""}
+          </div>
+        )}
         <div className="spread-viewport" ref={viewportRef}>
           <div
             className="spread-scaler"
             style={{ width: baseW * scale, height: Math.max(1, baseH * scale) }}
           >
             <div
-              className="spread"
+              className={`spread theme-${pageTheme}${fontSans ? " font-sans" : ""}`}
               ref={spreadRef}
               style={{
                 perspective: "1600px",
                 width: baseW,
                 transform: `scale(${scale})`,
                 transformOrigin: "top center",
-              }}
+                "--rfs": `${fontSize}px`,
+                "--rlh": String(lineHeight),
+              } as React.CSSProperties}
               onMouseUp={onSpreadMouseUp}
             >
-              {/* Trang nền bên trái */}
-              <div
-                className="page-slot"
-                onPointerDown={(e) => onPointerDown(e, rtl ? 1 : -1, "left")}
-                onPointerMove={onPointerMove}
-                onPointerUp={onPointerUp}
-              >
-                {renderFace(left, false, leftIndex ?? shownSpread)}
-              </div>
-              {twoPage && (
+              {/* Trang nền bên trái (null = bên trống, vd bìa manga RTL). */}
+              {leftIndex === null ? (
+                <div className="page-slot left empty" />
+              ) : (
                 <div
-                  className="page-slot"
-                  onPointerDown={(e) => onPointerDown(e, rtl ? -1 : 1, "right")}
+                  className={`page-slot ${twoPage ? "left" : "single"}${bookmarks.some((b) => b.page === leftIndex) ? " bookmarked" : ""}`}
+                  onPointerDown={(e) => onPointerDown(e, rtl ? 1 : -1, "left")}
                   onPointerMove={onPointerMove}
                   onPointerUp={onPointerUp}
                 >
-                  {renderFace(right, false, rightIndex ?? shownSpread + 1)}
+                  {renderFace(left, false, leftIndex ?? shownSpread)}
                 </div>
               )}
+              {twoPage &&
+                (rightIndex === null ? (
+                  <div className="page-slot right empty" />
+                ) : (
+                  <div
+                    className={`page-slot right${bookmarks.some((b) => b.page === rightIndex) ? " bookmarked" : ""}`}
+                    onPointerDown={(e) => onPointerDown(e, rtl ? -1 : 1, "right")}
+                    onPointerMove={onPointerMove}
+                    onPointerUp={onPointerUp}
+                  >
+                    {renderFace(right, false, rightIndex ?? shownSpread + 1)}
+                  </div>
+                ))}
               {/* Bóng đổ lên trang đích, đậm dần giữa chừng lật. */}
               <div ref={shadowRef} className={`curl-shadow${leafSpineLeft ? "" : " flip"}`} style={{ left: leafSpineLeft ? "0" : "50%" }} />
               {/* Lá đang lật: chỉ ôm 1 trang, xoay quanh gáy. Mặt trước = trang
@@ -1436,44 +1378,156 @@ export default function Reader({
           </div>
         </div>
 
-        {panel !== "none" && (
-          <ReaderPanels
-            tab={panel}
-            onTab={setPanel}
-            onClose={() => setPanel("none")}
-            total={total}
-            cur={cur}
+        {/* Sheet trượt phải (thiết kế v0.3.0): 1 sheet mở tại 1 thời điểm. */}
+        {sheet === "menu" && (
+          <MenuSheet
+            title="Tùy chọn đọc"
+            onClose={() => setSheet(null)}
+            onOpenSheet={(s) => setSheet(s)}
+            bookInfo={bookInfo}
+            isComic={isComic}
             isTextBook={isTextBook}
-            bookmarks={bookmarks}
-            onAddBookmark={(label) => void addBookmarkWithLabel(label)}
-            onJumpTo={jumpTo}
-            onDeleteBookmark={(id) => {
-              void api.bookmarkDelete(id).then(() => refreshBookmarks());
+            immersive={immersive}
+            onToggleImmersive={toggleImmersive}
+            twoPage={twoPage}
+            onSetTwoPage={(v) => {
+              if (v !== twoPage) toggleTwoPage();
             }}
-            searchSupported={searchApi.search !== null}
-            searchQuery={searchQuery}
-            onSearchQuery={setSearchQuery}
+            rtl={rtl}
+            onSetRtl={(v) => {
+              if (v !== rtl) toggleRtl();
+            }}
+            cropAuto={cropAuto}
+            onSetCropAuto={(v) => {
+              setCropAuto(v);
+              if (v) void autoDetectCrop();
+              else {
+                setCrop(NO_CROP);
+                setCropMsg("");
+              }
+            }}
+            crop={crop}
+            onCropChange={(c) => setCrop(clampCrop(c))}
+            onCropAutoDetect={() => void autoDetectCrop()}
+            onCropClear={() => {
+              setCrop(NO_CROP);
+              setCropMsg("");
+            }}
+            cropBusy={cropBusy}
+            cropMsg={cropMsg}
+            zoomLabel={`${fit === "page" ? "Vừa trang" : fit === "width" ? "Vừa rộng" : "Vừa cao"} · ${Math.round(scale * 100)}%`}
+            fit={fit}
+            onSetFit={setFit}
+            zoomPct={Math.round(scale * 100)}
+            onZoomIn={() => setZoom((z) => clampZoom(z * 1.2))}
+            onZoomOut={() => setZoom((z) => clampZoom(z / 1.2))}
+            onZoomReset={() => setZoom(1)}
+            bookmarked={bookmarkedHere}
+            onToggleBookmark={() => void toggleBookmark()}
+            fontLabel={`${fontSans ? "Be Vietnam Pro" : "Noto Serif"} · ${pageTheme === "light" ? "Sáng" : pageTheme === "paper" ? "Giấy" : "Đêm"}`}
+            ttsPlaying={ttsState !== "idle"}
+            ttsSupported={getTts().supported}
+            onToggleTts={toggleTts}
+            voices={ttsVoices}
+            voiceUri={ttsVoiceURI ?? ""}
+            onVoice={(uri) => {
+              const v = uri || null;
+              setTtsVoiceURI(v);
+              try {
+                if (v) localStorage.setItem("mio-tts-voice", v);
+                else localStorage.removeItem("mio-tts-voice");
+              } catch {
+                // Bỏ qua lỗi lưu.
+              }
+            }}
+            rate={ttsRate}
+            onRate={setTtsRate}
+            onDictHint={() => {
+              setSheet(null);
+              showToast(
+                isTextBook
+                  ? "Bôi đen 1 đoạn chữ trong sách rồi bấm “Tra từ” để tra từ điển."
+                  : "Truyện tranh không tra được từ — chữ nằm trong ảnh.",
+              );
+            }}
+            onOpenStats={onOpenStats}
+            onShowInfo={() => showToast(`${title} — ${bookInfo}`)}
+          />
+        )}
+        {sheet === "typo" && (
+          <TypoSheet
+            title="Chữ & nền trang"
+            onClose={() => setSheet(null)}
+            onOpenSheet={(s) => setSheet(s)}
+            fontSize={fontSize}
+            onFontSize={setFontSize}
+            lineHeight={lineHeight}
+            onLineHeight={setLineHeight}
+            fontSans={fontSans}
+            onFontSans={setFontSans}
+            pageTheme={pageTheme}
+            onPageTheme={setPageTheme}
+          />
+        )}
+        {sheet === "search" && (
+          <SearchSheet
+            title="Tìm trong sách"
+            onClose={() => setSheet(null)}
+            onOpenSheet={(s) => setSheet(s)}
+            query={searchQuery}
+            onQuery={setSearchQuery}
             onSearch={() => void runSearch()}
             searching={searching}
-            searchDone={searchDone}
-            searchTotal={searchTotal}
-            searchResults={searchResults}
-            onJumpSearch={jumpToSearchResult}
-            onCancelSearch={() => searchAbortRef.current?.abort()}
+            progress={`${searchDone}/${searchTotal}`}
+            onCancel={() => searchAbortRef.current?.abort()}
+            results={searchResults}
+            onJump={jumpToSearchResult}
+            searchable={searchApi.search !== null}
+          />
+        )}
+        {sheet === "grid" && (
+          <GridSheet
+            title="Lưới trang"
+            onClose={() => setSheet(null)}
+            onOpenSheet={(s) => setSheet(s)}
+            total={total}
+            currentPage={cur}
+            isTextBook={isTextBook}
+            chapters={(thumbApi.chapterTitles ?? []).map((t) => ({ title: t, href: "" }))}
+            loadThumb={loadThumb}
+            onJump={jumpTo}
+          />
+        )}
+        {sheet === "bookmarks" && (
+          <BookmarksSheet
+            title="Đánh dấu"
+            onClose={() => setSheet(null)}
+            onOpenSheet={(s) => setSheet(s)}
+            bookmarks={bookmarks}
+            currentPage={cur}
+            onJump={jumpTo}
+            onDelete={(id) => {
+              void api.bookmarkDelete(id).then(() => refreshBookmarks());
+            }}
+          />
+        )}
+        {sheet === "highlights" && (
+          <HighlightsSheet
+            title="Gạch chân đã lưu"
+            onClose={() => setSheet(null)}
+            onOpenSheet={(s) => setSheet(s)}
             highlights={highlights}
-            onDeleteHighlight={(id) => {
+            onJump={(h) => jumpTo(h.page)}
+            onDelete={(id) => {
               void api.highlightDelete(id).then(() => refreshHighlights());
             }}
-            onJumpHighlight={(h) => jumpTo(h.page)}
-            thumbFor={thumbApi.thumb ? loadThumb : null}
-            chapterTitles={thumbApi.chapterTitles}
-            rtl={rtl}
           />
         )}
       </div>
 
-      <footer className="reader-bar reader-bottom">
-        <button onClick={() => void commit(-1)} disabled={cur <= 0} title="Trang trước (←)">
+      {/* Thanh dưới: nút lùi / thanh trượt vị trí / nút tới / số trang. */}
+      <footer className="botbar">
+        <button className="botnav" onClick={() => void commit(-1)} disabled={cur <= 0} title="Trang trước (←)">
           ←
         </button>
         <input
@@ -1491,13 +1545,15 @@ export default function Reader({
             onProgress(n, total);
           }}
         />
-        <button onClick={() => void commit(1)} disabled={nextSpread === null} title="Trang sau (→)">
+        <button className="botnav" onClick={() => void commit(1)} disabled={nextSpread === null} title="Trang sau (→)">
           →
         </button>
-        <span className="page-label">
+        <span className="botlabel">
           {cur + 1} / {total}
         </span>
       </footer>
+
+      {toast && <div className="toast">{toast}</div>}
     </div>
   );
 }
