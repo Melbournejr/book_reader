@@ -9,32 +9,55 @@
  *   thì gộp chung 1 promise, không nạp trùng.
  */
 
-/** Thu nhỏ data URL ảnh thành thumbnail JPEG. */
+/** Thu nhỏ data URL ảnh thành thumbnail JPEG.
+ *  Đường chính: createImageBitmap resize ngoài luồng chính (WebView2 /
+ *  Chromium) — trang ảnh lớn của CBZ 300MB không còn chặn UI khi làm
+ *  bìa/lưới. Lỗi thì về lại đường cũ (img + canvas). */
 export function downscaleDataUrl(dataUrl: string, maxWidth = 240): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => {
-      try {
-        const scale = Math.min(1, maxWidth / img.naturalWidth);
-        const w = Math.max(1, Math.round(img.naturalWidth * scale));
-        const h = Math.max(1, Math.round(img.naturalHeight * scale));
-        const canvas = document.createElement("canvas");
-        canvas.width = w;
-        canvas.height = h;
-        const ctx = canvas.getContext("2d");
-        if (!ctx) {
-          reject(new Error("no-2d"));
-          return;
+  const viaBitmap = async (): Promise<string> => {
+    const blob = await (await fetch(dataUrl)).blob();
+    const bmp = await createImageBitmap(blob, {
+      resizeWidth: maxWidth,
+      resizeQuality: "high",
+    });
+    try {
+      const canvas = document.createElement("canvas");
+      canvas.width = bmp.width;
+      canvas.height = bmp.height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("no-2d");
+      ctx.drawImage(bmp, 0, 0);
+      return canvas.toDataURL("image/jpeg", 0.7);
+    } finally {
+      bmp.close();
+    }
+  };
+  const viaImg = (): Promise<string> =>
+    new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const scale = Math.min(1, maxWidth / img.naturalWidth);
+          const w = Math.max(1, Math.round(img.naturalWidth * scale));
+          const h = Math.max(1, Math.round(img.naturalHeight * scale));
+          const canvas = document.createElement("canvas");
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext("2d");
+          if (!ctx) {
+            reject(new Error("no-2d"));
+            return;
+          }
+          ctx.drawImage(img, 0, 0, w, h);
+          resolve(canvas.toDataURL("image/jpeg", 0.7));
+        } catch (e) {
+          reject(e);
         }
-        ctx.drawImage(img, 0, 0, w, h);
-        resolve(canvas.toDataURL("image/jpeg", 0.7));
-      } catch (e) {
-        reject(e);
-      }
-    };
-    img.onerror = () => reject(new Error("thumb-load"));
-    img.src = dataUrl;
-  });
+      };
+      img.onerror = () => reject(new Error("thumb-load"));
+      img.src = dataUrl;
+    });
+  return viaBitmap().catch(() => viaImg());
 }
 
 export class ThumbCache {
