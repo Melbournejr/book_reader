@@ -161,6 +161,17 @@ pub fn delete_bookmark(db_path: &Path, id: i64) -> Result<(), String> {
     Ok(())
 }
 
+/// Số cuốn có ít nhất 1 bookmark (v0.3.0, badge "Đã đánh dấu" ở sidebar).
+pub fn bookmarks_book_count(db_path: &Path) -> Result<i64, String> {
+    let conn = db::open(db_path)?;
+    conn.query_row(
+        "SELECT COUNT(DISTINCT book_id) FROM bookmarks",
+        [],
+        |r| r.get::<_, i64>(0),
+    )
+    .map_err(|e| e.to_string())
+}
+
 // ---------- highlights (gạch chân chữ, EPUB/MOBI) ----------
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -319,6 +330,8 @@ pub struct StatsSession {
 /// Tổng toàn app. `days` là các số ngày riêng biệt đã đọc (ngày UTC =
 /// started_at / 86_400_000); frontend tự tính streak từ danh sách này
 /// (hàm thuần, test được bằng Node) thay vì Rust tính sẵn.
+/// `per_day` (v0.3.0): tổng theo từng ngày, 14 ngày gần nhất, mới nhất
+/// trước — phục vụ biểu đồ tuần + so sánh tuần trước của màn Thống kê.
 #[derive(Debug, Serialize)]
 pub struct StatsSummary {
     pub total_seconds: i64,
@@ -326,6 +339,15 @@ pub struct StatsSummary {
     pub total_sessions: i64,
     pub books_finished: i64,
     pub days: Vec<i64>,
+    pub per_day: Vec<StatsDay>,
+}
+
+/// Tổng đọc của 1 ngày (ngày UTC = started_at / 86_400_000).
+#[derive(Debug, Serialize)]
+pub struct StatsDay {
+    pub day: i64,
+    pub seconds: i64,
+    pub pages: i64,
 }
 
 /// 1 dòng thống kê theo từng cuốn (kể cả cuốn chưa có phiên nào: 0 hết).
@@ -376,12 +398,33 @@ pub fn stats_summary(db_path: &Path) -> Result<StatsSummary, String> {
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
+    // Tổng theo từng ngày, 14 ngày gần nhất (v0.3.0, cho biểu đồ tuần).
+    let mut stmt2 = conn
+        .prepare(
+            "SELECT CAST(started_at / 86400000 AS INTEGER) AS day,
+                    COALESCE(SUM(seconds), 0), COALESCE(SUM(pages_read), 0)
+             FROM reading_sessions
+             GROUP BY day ORDER BY day DESC LIMIT 14",
+        )
+        .map_err(|e| e.to_string())?;
+    let per_day = stmt2
+        .query_map([], |r| {
+            Ok(StatsDay {
+                day: r.get(0)?,
+                seconds: r.get(1)?,
+                pages: r.get(2)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
     Ok(StatsSummary {
         total_seconds,
         total_pages,
         total_sessions,
         books_finished,
         days,
+        per_day,
     })
 }
 

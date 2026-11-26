@@ -293,6 +293,12 @@ fn bookmark_delete(state: State<AppState>, id: i64) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn bookmarks_book_count(state: State<AppState>) -> Result<i64, String> {
+    let p = state.db_path.lock().unwrap().clone();
+    history::bookmarks_book_count(&p)
+}
+
+#[tauri::command]
 fn highlight_add(state: State<AppState>, h: HighlightNew) -> Result<i64, String> {
     let p = state.db_path.lock().unwrap().clone();
     history::add_highlight(&p, h)
@@ -407,6 +413,7 @@ fn main() {
             history_bookmark,
             bookmarks_list,
             bookmark_delete,
+            bookmarks_book_count,
             highlight_add,
             highlights_list,
             highlight_delete,
