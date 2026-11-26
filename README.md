@@ -196,6 +196,24 @@ không có đọc manga phải → trái. Bản này sửa cả 3 + làm lại g
   không, lật còn ngược không (nhất là truyện ảnh CBZ), manga lật đúng
   chiều + đúng trang chưa, menu mở/đóng có mượt không.
 
+### v0.3.4 — sửa hiển thị spread truyện tranh + kéo trượt trang mượt (26/11/2026)
+Thiện báo v0.3.3 hiển thị vẫn lỗi: 2 trang truyện có khe đen lớn ở gáy,
+trang nhỏ lọt thỏm giữa nền đen, đáy cửa sổ còn 1 thanh cuộn ngang thừa;
+kéo thanh trượt trang thì thô, cứng. Nguyên nhân: (1) spread rộng cố định
+1200px, mỗi slot chia đôi đúng 600px, ảnh truyện cao (tỉ lệ ~0.7) thì
+`object-fit: contain` để lại 2 dải đen to 2 bên mỗi trang — gộp lại thành
+khe đen ở gáy; spread 1200px * scale còn tràn ngang cửa sổ. (2) mỗi tick
+kéo thanh trượt đều nạp trang + ghi lịch sử SQLite + nạp lại toàn bộ lịch
+sử nên kéo giật. Sửa: (1) mỗi slot ôm đúng tỉ lệ thật của trang ảnh (đo
+từ ảnh đã giải mã / sự kiện onLoad, chưa biết thì tạm 0.72), 2 trang khít
+nhau ở gáy, lá lật + bóng đổ cũng lấy đúng bề rộng slot thật; sách chữ
+giữ chia đôi như cũ; lá lật thêm `will-change: transform`. (2) kéo thanh
+trượt chỉ đổi vị trí hiển thị, thả ra mới nhảy trang. (3) `html, body`
+`overflow-x: hidden` để không còn thanh cuộn ngang ở cấp cửa sổ (cuộn khi
+zoom vẫn nằm trong vùng đọc). Chưa kiểm bằng mắt trên máy thật (không có
+WebView ở máy này): phép tính bề rộng đã kiểm bằng test số, còn cảm giác
+lật/kéo trên file thật vẫn cần Thiện thử.
+
 ### v0.3.3 — màn "Thư mục": duyệt cây thư mục như Explorer (26/11/2026)
 Thiện cần duyệt thư mục truyện theo từng tầng (Truyện tranh → Hesman →
 Hesman.2 → từng file PDF...) chứ không phải thêm thư mục to là app đổ
