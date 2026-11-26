@@ -196,6 +196,72 @@ không có đọc manga phải → trái. Bản này sửa cả 3 + làm lại g
   không, lật còn ngược không (nhất là truyện ảnh CBZ), manga lật đúng
   chiều + đúng trang chưa, menu mở/đóng có mượt không.
 
+### v0.3.0 — làm lại giao diện theo thiết kế đã duyệt
+Thiện xem bản 0.2.0: "có cải tiến, cơ mà giao diện ứng dụng tao vẫn không
+thể thẩm nổi" — nhờ lên 1 thiết kế UI, duyệt rồi bảo "làm lại theo đúng
+giao diện này". Bản này làm lại giao diện theo đúng artifact "Thiết kế UI
+Mio Reader" (mực–giấy–đỏ đèn lồng, Noto Serif + Be Vietnam Pro), không bỏ
+tính năng nào, chỉ sắp xếp lại.
+
+- **Khung app mới:** sidebar tối 212px (Thư viện / Đang đọc / Thống kê /
+  Nguồn sách, "Kệ của tôi": Đã đánh dấu, Đã tải xuống, dung lượng kệ,
+  Cài đặt) + màn hình chính. Không còn thanh topbar cũ.
+- **Thư viện (kệ sách):** thẻ "Tiếp tục đọc" (cuốn đang đọc dở, tiến độ,
+  nút Đọc tiếp), lưới bìa sách (gradient theo định dạng + gáy sách; bìa
+  CBZ dùng ảnh trang đầu tải lười), chip lọc: Tất cả / Máy này / Telegram
+  / OPDS / Truyện tranh / Đang đọc dở, ô tìm tên sách. Thư mục đã chọn
+  được nhớ lại (mở app lên là kệ có sẵn sách, không cần chọn lại).
+- **Trình đọc (giấy):** nền sân khấu tối #262019, thanh trên là viên thuốc
+  (tiêu đề + 5 nút hàng ngày: đánh dấu, tìm, Aa, đọc thành tiếng, toàn
+  màn hình + nút ⋯), thanh dưới có thanh trượt vị trí, tag truyện tranh
+  "Trang 98 / 214 · RTL", vùng bấm lật ở 2 mép (dải hẹp, không che vùng
+  kéo lật giữa trang), toast báo xác nhận thao tác.
+- **Menu ⋯ thành sheet trượt phải** (thay menu thả xuống + panel bên):
+  nhóm Đọc (toàn màn hình, kiểu trang 2/1, manga RTL, tự cắt lề trắng +
+  chỉnh tay 4 phía, thu phóng + vừa trang/rộng/cao), Trang này (đánh dấu,
+  danh sách đánh dấu, gạch chân đã lưu, lưới trang, tìm, chữ & nền trang),
+  Nghe & tra cứu (đọc thành tiếng + chọn giọng/tốc độ, tra từ điển),
+  Cuốn sách (thông tin sách, thống kê đọc). Sheet riêng cho Chữ & nền
+  trang (cỡ chữ 13.5–19, giãn dòng 1.5–2.1, Serif/Sans, nền Sáng/Giấy/Đêm
+  — nhớ theo từng cuốn), Tìm trong sách (kết quả bôi vàng từ khóa),
+  Lưới trang, Đánh dấu, Gạch chân.
+- **Truyện tranh auto-RTL:** mở CBZ/CBR chưa có cài đặt riêng thì RTL
+  mặc định BẬT (bìa lẻ bên phải, spread (1,2), (3,4)... theo mô hình
+  `spread.ts` đã chứng minh ở v0.2.0 — bản thiết kế ghi "(2,3), (4,5)"
+  theo cách đếm trang từ 1, cùng 1 thứ). Tắt trong menu thì nhớ theo
+  từng cuốn. Sách chữ/PDF vẫn theo mặc định chung trong Cài đặt.
+- **Màn Thống kê mới:** 4 thẻ (thời gian tuần này, trang tuần này, chuỗi
+  ngày, trung bình/ngày — kèm % so với tuần trước), biểu đồ cột 7 ngày
+  gần nhất (phút đọc/ngày, cột cao nhất tô đỏ), từng cuốn (tiến độ, nút
+  Đọc tiếp). Dữ liệu tuần lấy từ `per_day` mới trong `stats_summary`
+  (Rust trả tổng 14 ngày gần nhất; lệnh mới `bookmarks_book_count` cho
+  số đếm "Đã đánh dấu" ở sidebar).
+- **Màn Nguồn sách mới:** 3 thẻ (Telegram / OPDS / thư mục trên máy) +
+  panel mở ngay dưới: TelegramPanel (đăng nhập MTProto như cũ, chỉ nạp
+  GramJS khi mở thẻ), OPDS (duyệt + tải về, file tải qua OPDS được nhớ
+  để lọc chip OPDS trong thư viện), đổi thư mục quét kệ.
+- **Cài đặt** (sidebar): công tắc manga RTL mặc định, kiểm tra cập nhật
+  (banner cũ), phiên bản. Font Noto Serif / Be Vietnam Pro tải từ Google
+  Fonts khi có mạng, không có mạng thì fallback Georgia/system-ui.
+- **Thay đổi nhỏ so với thiết kế (ghi rõ):** (1) không làm thanh
+  titlebar giả có 3 chấm tròn — cửa sổ thật của Tauri đã có titlebar của
+  Windows; (2) vùng bấm lật 2 bên chỉ rộng tối đa 72px (thiết kế ghi 22%)
+  để không che vùng kéo-lật giữa trang; (3) công tắc "Hiệu ứng lật trang"
+  bỏ khỏi menu — lật cong luôn bật; (4) "Đã đánh dấu" trong sidebar chỉ
+  hiện số đếm (bấm vào thì về thư viện, chưa có màn riêng liệt kê mọi
+  bookmark của mọi cuốn); (5) tag "Trang X / N · RTL" chỉ hiện với truyện
+  tranh; (6) số trang nhỏ dưới trang chữ chỉ hiện với sách chữ, không
+  hiện trên trang ảnh.
+- **Giữ nguyên, đã test lại bằng Node (102 test, xem /tmp/v03-test/test.ts
+  — file test không đưa vào repo):** thứ tự đọc 0→5 đủ trang ở cả 4 chế
+  độ (1/2 trang × LTR/RTL), spread manga + lá lật đúng trang, mặt sau
+  không ngược khi nhìn thấy được (pre-mirror cho hệ số âm — lỗi cũ),
+  auto-RTL, tổng tuần + nhãn thứ + % thay đổi tuần.
+- **Chưa test được ở đây:** như các bản trước (không cargo/WebView) —
+  cần Thiện test trên máy thật: sidebar/màn hình mới, sheet menu, cỡ chữ
+  + nền trang có áp dụng đúng không, manga auto-RTL khi mở CBZ mới,
+  biểu đồ tuần có đúng số liệu không, Telegram/OPDS trong màn Nguồn sách.
+
 ### Còn lại sau P2
 - **Telegram range-download cho CBZ là phần rủi ro nhất.** Logic tải đuôi ZIP
   → central directory → từng trang đã viết trong `src/lib/telegram.ts`, nhưng
