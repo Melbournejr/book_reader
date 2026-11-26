@@ -3,9 +3,13 @@
  *
  * Nếp gấp = đường trung trực của đoạn từ điểm nắm ban đầu (grab) tới vị
  * trí con trỏ hiện tại (pointer). Điểm nắm gấp đúng tới tay người đọc.
- * Mặt sau của lá trang được soi gương sẵn (scaleX(-1)) để triệt tiêu với
- * phép phản xạ của nếp gấp -> thành phép quay thuần, trang sau không bao
- * giờ hiện ngược. Xem bản web v9: lỗi ngược ảnh đã sửa 2026-11-21.
+ *
+ * LƯU Ý (v0.2.0): mặt sau của lá trang KHÔNG được soi gương sẵn
+ * (scaleX(-1)) ở đây. Bản web v9 dùng pre-mirror vì mô hình giấy của nó
+ * khác; bản desktop dùng mô hình thẻ 3D (rotateY quanh gáy) nên pre-mirror
+ * sẽ soi gương 2 lần -> trang sau hiện ngược. Mô hình đúng nằm ở
+ * lib/spread.ts (backFaceFactor / frontFaceFactor) và Reader.tsx render
+ * mặt sau với mirrored=false. Đừng "sửa" lại theo kiểu web v9.
  */
 
 export interface FoldPoint {

@@ -39,6 +39,49 @@ export function formatDuration(seconds: number): string {
   return rm > 0 ? `${h} giờ ${rm} phút` : `${h} giờ`;
 }
 
+// ---------- v0.3.0: tổng theo tuần, phục vụ màn hình Thống kê ----------
+
+export interface WeekTotals {
+  seconds: number;
+  pages: number;
+  /** Số ngày trong tuần có đọc. */
+  activeDays: number;
+}
+
+/** Tổng đọc của 1 tuần: tuần bắt đầu từ `weekStartDay` (số ngày UTC),
+ *  dài 7 ngày. `perDay` là StatsDay[] từ stats_summary. */
+export function weekTotals(
+  perDay: { day: number; seconds: number; pages: number }[],
+  weekStartDay: number,
+): WeekTotals {
+  let seconds = 0;
+  let pages = 0;
+  let activeDays = 0;
+  for (const d of perDay) {
+    if (d.day >= weekStartDay && d.day < weekStartDay + 7) {
+      seconds += d.seconds;
+      pages += d.pages;
+      activeDays++;
+    }
+  }
+  return { seconds, pages, activeDays };
+}
+
+/** Nhãn ngày trong tuần (tiếng Việt) của 1 số ngày UTC: T2..CN.
+ *  Ngày 0 (1970-01-01) là thứ 5 -> day % 7: 0=T5, 1=T6, 2=T7, 3=CN,
+ *  4=T2, 5=T3, 6=T4. */
+export function weekdayLabel(day: number): string {
+  const labels = ["T5", "T6", "T7", "CN", "T2", "T3", "T4"];
+  return labels[((day % 7) + 7) % 7];
+}
+
+/** % thay đổi tuần này so với tuần trước; null khi tuần trước = 0
+ *  (không có gì để so — hiển thị "mới" thay vì 1 con số vô nghĩa). */
+export function weekDeltaPct(cur: number, prev: number): number | null {
+  if (prev <= 0) return null;
+  return Math.round(((cur - prev) / prev) * 100);
+}
+
 /** "25/11/2026" — ngày đọc cuối của 1 cuốn. */
 export function formatDay(ms: number): string {
   try {

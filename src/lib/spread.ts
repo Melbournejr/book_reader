@@ -178,3 +178,23 @@ export function frontFaceFactor(progress: number, spineLeft: boolean): number {
 export function backFaceVisible(progress: number): boolean {
   return progress > 0.5;
 }
+
+/** RTL mặc định khi mở 1 cuốn (v0.3.0 — truyện tranh auto-RTL theo thiết kế):
+ *  - cuốn đã có cài đặt riêng (savedRtl) thì dùng cài đặt đó;
+ *  - truyện tranh (CBZ/CBR) chưa có cài đặt riêng thì RTL mặc định BẬT;
+ *  - còn lại dùng mặc định chung của app (globalDefault, checkbox trong Cài đặt). */
+export function resolveInitialRtl(
+  format: string,
+  savedRtl: boolean | undefined,
+  globalDefault: boolean,
+): boolean {
+  if (savedRtl !== undefined) return savedRtl;
+  if (isComicFormat(format)) return true;
+  return globalDefault;
+}
+
+/** Định dạng truyện tranh (ảnh theo trang). */
+export function isComicFormat(format: string): boolean {
+  const f = format.toLowerCase();
+  return f === "cbz" || f === "cbr";
+}

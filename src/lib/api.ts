@@ -40,6 +40,8 @@ export const api = {
   }) => invoke("history_bookmark", { b }),
   bookmarksList: (bookId: string) =>
     invoke<Bookmark[]>("bookmarks_list", { book_id: bookId }),
+  /** Số cuốn có ít nhất 1 bookmark (badge "Đã đánh dấu" ở sidebar, v0.3.0). */
+  bookmarksBookCount: () => invoke<number>("bookmarks_book_count"),
   bookmarkDelete: (id: number) => invoke("bookmark_delete", { id }),
   highlightAdd: (h: {
     book_id: string;

@@ -4,7 +4,7 @@
  *
  * - Ảnh gốc vẫn nạp đủ (qua loadPage/renderThumb) rồi mới thu nhỏ — với
  *   CBZ mỗi thumb tốn 1 lần giải nén trang, nên chỉ render thumb khi
- *   ô đó cuộn tới gần (IntersectionObserver bên ReaderPanels).
+ *   ô đó cuộn tới gần (IntersectionObserver bên lưới trang).
  * - Cache tối đa 60 thumb (LRU): vượt thì xóa cái cũ nhất. Đang nạp dở
  *   thì gộp chung 1 promise, không nạp trùng.
  */
