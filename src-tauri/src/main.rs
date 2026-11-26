@@ -168,6 +168,57 @@ fn list_books(folder: String) -> Result<Vec<BookMeta>, String> {
     Ok(out)
 }
 
+/// Một mục trong cây thư mục: thư mục con hoặc 1 file sách.
+#[derive(Debug, Serialize)]
+pub struct FolderEntry {
+    pub name: String,
+    pub path: String,
+    pub is_folder: bool,
+    pub meta: Option<BookMeta>,
+}
+
+/// Liệt kê con TRỰC TIẾP của 1 thư mục (không đệ quy): thư mục con trước,
+/// rồi tới file sách — mỗi nhóm sắp theo tên. Đây là nền cho màn "Thư mục"
+/// (cây thư mục): mở thư mục to không còn đổ tất cả sách vào 1 danh sách
+/// phẳng nữa mà duyệt từng tầng như Explorer.
+#[tauri::command]
+fn list_folder(path: String) -> Result<Vec<FolderEntry>, String> {
+    let rd = std::fs::read_dir(&path).map_err(|e| e.to_string())?;
+    let mut folders: Vec<FolderEntry> = Vec::new();
+    let mut books: Vec<FolderEntry> = Vec::new();
+    for ent in rd.flatten() {
+        let p = ent.path();
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if name.starts_with('.') {
+            continue;
+        }
+        if p.is_dir() {
+            folders.push(FolderEntry {
+                name,
+                path: p.to_string_lossy().to_string(),
+                is_folder: true,
+                meta: None,
+            });
+        } else if is_book(&p) {
+            if let Ok(meta) = file_metadata(p.to_string_lossy().to_string()) {
+                books.push(FolderEntry {
+                    name,
+                    path: meta.path.clone(),
+                    is_folder: false,
+                    meta: Some(meta),
+                });
+            }
+        }
+    }
+    folders.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    books.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    folders.extend(books);
+    Ok(folders)
+}
+
 // ---------- CBZ: đọc lười từng trang ----------
 
 /// Chỉ mục CBZ (đã sắp xếp tự nhiên theo tên: page1, page2, page10...).
@@ -470,6 +521,7 @@ fn main() {
             pick_folder_app,
             file_metadata,
             list_books,
+            list_folder,
             cbz_index,
             cbz_page,
             read_range,
