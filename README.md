@@ -196,6 +196,18 @@ không có đọc manga phải → trái. Bản này sửa cả 3 + làm lại g
   không, lật còn ngược không (nhất là truyện ảnh CBZ), manga lật đúng
   chiều + đúng trang chưa, menu mở/đóng có mượt không.
 
+### v0.3.1 — sửa lỗi bìa "Tiếp tục đọc" nuốt cả app (26/11/2026)
+Thiện cài v0.3.0, mở app lên thấy 1 trang truyện (bìa Bloody Monday) chiếm
+hết cửa sổ, không bấm được gì, không thoát được. Nguyên nhân: ảnh bìa trong
+thẻ "Tiếp tục đọc" (`.cc-cover img`) dùng `position: absolute; inset: 0`
+nhưng `.cc-cover` thiếu `position: relative` — nên ảnh không nằm gọn trong
+khung 118×158 mà bung ra đúng bằng cửa sổ, đè lên toàn bộ sidebar, nút bấm,
+thư viện (cả huy hiệu CBZ cũng trôi lên góc phải cửa sổ). Chỉ xảy ra khi có
+cuốn CBZ local đang đọc dở (bìa tải từ trang đầu của file); bìa gradient
+(EPUB/PDF/MOBI, Telegram) không bị. Sửa 1 dòng: thêm `position: relative`
+cho `.cc-cover`. Đã rà toàn bộ các phần tử `position: absolute` khác trong
+styles.css — chỉ chỗ này thiếu khung chứa.
+
 ### v0.3.0 — làm lại giao diện theo thiết kế đã duyệt
 Thiện xem bản 0.2.0: "có cải tiến, cơ mà giao diện ứng dụng tao vẫn không
 thể thẩm nổi" — nhờ lên 1 thiết kế UI, duyệt rồi bảo "làm lại theo đúng
