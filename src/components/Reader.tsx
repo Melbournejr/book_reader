@@ -173,6 +173,9 @@ export default function Reader({
   // ---- v0.3.0: sheet trượt phải thay cho menu thả xuống + panel bên ----
   // 1 sheet mở tại 1 thời điểm: menu ⋯ / chữ & nền / tìm / lưới / đánh dấu / gạch chân.
   const [sheet, setSheet] = useState<SheetKind>(null);
+  // Thanh trượt trang dưới (v0.3.4): giá trị đang kéo, chỉ nhảy trang khi
+  // thả ra — xem commitSlider ở cuối component.
+  const [sliderVal, setSliderVal] = useState<number | null>(null);
   // Toast nổi dưới màn hình (xác nhận thao tác trong menu, lỗi TTS...).
   const [toast, setToast] = useState<string | null>(null);
   const toastTimerRef = useRef<number | null>(null);
@@ -184,6 +187,24 @@ export default function Reader({
   // Trong lúc lật, nền hiển thị spread đích để lá lật xong là khớp, không giật.
   const [curlTarget, setCurlTarget] = useState<number | null>(null);
   const [, setCacheVersion] = useState(0);
+
+  // ---- v0.3.4: tỉ lệ thật của từng trang ảnh (rộng/cao) ----
+  // Trước đây spread rộng cố định 1200px, mỗi slot chia đôi đúng 600px,
+  // ảnh truyện cao (tỉ lệ ~0.7) thì `object-fit: contain` để lại 2 dải
+  // đen to 2 bên mỗi trang — gộp lại thành khe đen lớn ở gáy (ảnh Thiện
+  // gửi) và spread 1200px * scale còn tràn ngang cửa sổ. Giờ mỗi slot ôm
+  // đúng tỉ lệ ảnh: rộng = tỉ lệ * chiều cao spread, 2 trang khít nhau
+  // ở gáy, không còn dải đen thừa.
+  const aspectRef = useRef(new Map<number, number>());
+  const [, setAspectVersion] = useState(0);
+  const noteAspect = useCallback((index: number, w: number, h: number) => {
+    if (!w || !h) return;
+    const a = w / h;
+    if (aspectRef.current.get(index) !== a) {
+      aspectRef.current.set(index, a);
+      setAspectVersion((v) => v + 1);
+    }
+  }, []);
 
   // ---- v0.3.0: sheet trượt phải (menu ⋯ + các bảng) ----
   const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
@@ -361,11 +382,31 @@ export default function Reader({
   const baseW = twoPage
     ? Math.min(1200, Math.max(320, vpSize.w - 24))
     : Math.min(600, Math.max(320, vpSize.w - 24));
+  // Trang ảnh thì mỗi slot ôm đúng tỉ lệ ảnh (v0.3.4, xem noteAspect):
+  // rộng = tỉ lệ * chiều cao spread; chưa biết tỉ lệ thì tạm 0.72 (tỉ lệ
+  // truyện tranh thường gặp), ảnh nạp xong sẽ chỉnh lại đúng tỉ lệ thật.
+  // Sách chữ giữ chia đôi như cũ (chữ tự chảy đầy slot).
+  const useAspectSlots = Boolean(left?.isImage || right?.isImage || isComic);
+  const aspectSlotW = (idx: number | null): number | null => {
+    if (idx === null) return null;
+    const a = aspectRef.current.get(idx) ?? 0.72;
+    return Math.max(120, a * baseH);
+  };
+  const fallbackSlotW = Math.max(120, 0.72 * baseH);
+  const leftSlotW = useAspectSlots
+    ? (aspectSlotW(leftIndex) ?? aspectSlotW(rightIndex) ?? fallbackSlotW)
+    : 0;
+  const rightSlotW = useAspectSlots && twoPage
+    ? (aspectSlotW(rightIndex) ?? aspectSlotW(leftIndex) ?? fallbackSlotW)
+    : 0;
+  // Bên trống (vd bìa manga RTL chỉ có 1 trang bên phải) thì rộng bằng bên
+  // kia để trang không bị lệch khỏi phía của nó.
+  const naturalW = useAspectSlots ? (twoPage ? leftSlotW + rightSlotW : leftSlotW) : baseW;
   // Chương sách chữ dài hơn viewport thì fit theo chiều rộng là chính,
   // không thu nhỏ chữ tới mức không đọc được.
   const effH = Math.min(baseH, vpSize.h);
   const fitScale =
-    fit === "width" ? vpSize.w / baseW : fit === "height" ? vpSize.h / effH : Math.min(vpSize.w / baseW, vpSize.h / effH);
+    fit === "width" ? vpSize.w / naturalW : fit === "height" ? vpSize.h / effH : Math.min(vpSize.w / naturalW, vpSize.h / effH);
   const scale = fitScale * zoom;
   const zoomedBeyondFit = zoom > 1.02;
 
@@ -532,20 +573,21 @@ export default function Reader({
     return () => cancelAnimationFrame(t);
   }, [pendingMark, cur]);
 
-  const decodeImages = useCallback(async (pages: (ReaderPage | undefined)[]) => {
+  const decodeImages = useCallback(async (indices: number[], pages: (ReaderPage | undefined)[]) => {
     await Promise.all(
-      pages.map(async (p) => {
+      pages.map(async (p, k) => {
         if (!p?.isImage) return;
         try {
           const img = new Image();
           img.src = p.content;
           await img.decode();
+          noteAspect(indices[k], img.naturalWidth, img.naturalHeight);
         } catch {
           // Giải mã lỗi thì cứ lật tiếp, ảnh sẽ hiện khi trình duyệt nạp xong.
         }
       }),
     );
-  }, []);
+  }, [noteAspect]);
 
   // ---- P2: đọc thành tiếng (TTS) ----
   const getTts = useCallback(() => {
@@ -783,7 +825,7 @@ export default function Reader({
           (p): p is number => p !== null,
         );
         await ensure(destPages);
-        await decodeImages(destPages.map((p) => cacheRef.current.get(p)));
+        await decodeImages(destPages, destPages.map((p) => cacheRef.current.get(p)));
         // Zoom vượt vừa trang thì không lật cong nữa, nhảy thẳng trang.
         if (!flipOn || fromProgress >= 1 || zoomedBeyondFit) {
           setSpread(leaf.next);
@@ -1115,6 +1157,7 @@ export default function Reader({
             src={p.content}
             alt={p.label}
             draggable={false}
+            onLoad={(e) => noteAspect(pageIndex, e.currentTarget.naturalWidth, e.currentTarget.naturalHeight)}
             style={cropActive ? cropImgStyle(crop) : undefined}
           />
         ) : (
@@ -1151,6 +1194,20 @@ export default function Reader({
   const bookmarkedHere = bookmarks.some(
     (b) => b.page === cur || (twoPage && b.page === cur + 1),
   );
+
+  // Thanh trượt dưới (v0.3.4): kéo chỉ đổi vị trí hiển thị, thả ra mới
+  // nhảy trang. Trước đây mỗi tick kéo đều nạp trang + ghi lịch sử SQLite
+  // + nạp lại toàn bộ lịch sử nên kéo trượt giật, cứng.
+  const commitSlider = useCallback(() => {
+    if (sliderVal === null) return;
+    const n = sliderVal;
+    setSliderVal(null);
+    if (n === cur) return;
+    stopTtsRef.current();
+    void ensure([n, n + 1]);
+    setSpread(spreadStartForPage(n, twoPage, rtl, total));
+    onProgress(n, total);
+  }, [sliderVal, cur, twoPage, rtl, total, ensure, onProgress]);
 
   return (
     <div
@@ -1312,14 +1369,14 @@ export default function Reader({
         <div className="spread-viewport" ref={viewportRef}>
           <div
             className="spread-scaler"
-            style={{ width: baseW * scale, height: Math.max(1, baseH * scale) }}
+            style={{ width: naturalW * scale, height: Math.max(1, baseH * scale) }}
           >
             <div
               className={`spread theme-${pageTheme}${fontSans ? " font-sans" : ""}`}
               ref={spreadRef}
               style={{
                 perspective: "1600px",
-                width: baseW,
+                width: naturalW,
                 transform: `scale(${scale})`,
                 transformOrigin: "top center",
                 "--rfs": `${fontSize}px`,
@@ -1329,10 +1386,14 @@ export default function Reader({
             >
               {/* Trang nền bên trái (null = bên trống, vd bìa manga RTL). */}
               {leftIndex === null ? (
-                <div className="page-slot left empty" />
+                <div
+                  className="page-slot left empty"
+                  style={useAspectSlots ? { flex: "none", width: leftSlotW } : undefined}
+                />
               ) : (
                 <div
                   className={`page-slot ${twoPage ? "left" : "single"}${bookmarks.some((b) => b.page === leftIndex) ? " bookmarked" : ""}`}
+                  style={useAspectSlots ? { flex: "none", width: leftSlotW } : undefined}
                   onPointerDown={(e) => onPointerDown(e, rtl ? 1 : -1, "left")}
                   onPointerMove={onPointerMove}
                   onPointerUp={onPointerUp}
@@ -1342,10 +1403,14 @@ export default function Reader({
               )}
               {twoPage &&
                 (rightIndex === null ? (
-                  <div className="page-slot right empty" />
+                  <div
+                    className="page-slot right empty"
+                    style={useAspectSlots ? { flex: "none", width: rightSlotW } : undefined}
+                  />
                 ) : (
                   <div
                     className={`page-slot right${bookmarks.some((b) => b.page === rightIndex) ? " bookmarked" : ""}`}
+                    style={useAspectSlots ? { flex: "none", width: rightSlotW } : undefined}
                     onPointerDown={(e) => onPointerDown(e, rtl ? -1 : 1, "right")}
                     onPointerMove={onPointerMove}
                     onPointerUp={onPointerUp}
@@ -1354,7 +1419,20 @@ export default function Reader({
                   </div>
                 ))}
               {/* Bóng đổ lên trang đích, đậm dần giữa chừng lật. */}
-              <div ref={shadowRef} className={`curl-shadow${leafSpineLeft ? "" : " flip"}`} style={{ left: leafSpineLeft ? "0" : "50%" }} />
+              <div
+                ref={shadowRef}
+                className={`curl-shadow${leafSpineLeft ? "" : " flip"}`}
+                style={
+                  !twoPage
+                    ? { left: 0, width: "100%" }
+                    : useAspectSlots
+                      ? {
+                          left: leafSpineLeft ? 0 : leftSlotW,
+                          width: leafSpineLeft ? leftSlotW : rightSlotW,
+                        }
+                      : { left: leafSpineLeft ? "0" : "50%" }
+                }
+              />
               {/* Lá đang lật: chỉ ôm 1 trang, xoay quanh gáy. Mặt trước = trang
                   hiện tại, mặt sau = trang đích. CHÚ Ý (v0.2.0): mặt sau KHÔNG
                   soi gương sẵn nữa — `.leaf-back { rotateY(180deg) }` trong
@@ -1365,8 +1443,21 @@ export default function Reader({
                 ref={leafRef}
                 className="curl-leaf"
                 style={{
-                  left: twoPage ? (leafSpineLeft ? "50%" : "0") : "0",
-                  width: twoPage ? "50%" : "100%",
+                  // Trang ảnh: lá lật ôm đúng bề rộng slot thật (px), không
+                  // còn "50% spread" như khi slot chia đôi (v0.3.4). Lá ở
+                  // slot phải khi gáy bên trái (spineLeft) và ngược lại.
+                  left: !twoPage
+                    ? 0
+                    : useAspectSlots
+                      ? (leafSpineLeft ? leftSlotW : 0)
+                      : leafSpineLeft
+                        ? "50%"
+                        : "0",
+                  width: !twoPage
+                    ? "100%"
+                    : useAspectSlots
+                      ? (leafSpineLeft ? rightSlotW : leftSlotW)
+                      : "50%",
                   opacity: 0,
                 }}
               >
@@ -1534,22 +1625,19 @@ export default function Reader({
           type="range"
           min={0}
           max={Math.max(0, total - 1)}
-          value={cur}
+          value={sliderVal ?? cur}
           style={{ direction: rtl ? "rtl" : "ltr" }}
-          title={`Trang ${cur + 1} / ${total}`}
-          onChange={(e) => {
-            const n = Number(e.target.value);
-            stopTtsRef.current();
-            void ensure([n, n + 1]);
-            setSpread(spreadStartForPage(n, twoPage, rtl, total));
-            onProgress(n, total);
-          }}
+          title={`Trang ${(sliderVal ?? cur) + 1} / ${total}`}
+          onChange={(e) => setSliderVal(Number(e.target.value))}
+          onPointerUp={() => commitSlider()}
+          onKeyUp={() => commitSlider()}
+          onBlur={() => commitSlider()}
         />
         <button className="botnav" onClick={() => void commit(1)} disabled={nextSpread === null} title="Trang sau (→)">
           →
         </button>
         <span className="botlabel">
-          {cur + 1} / {total}
+          {(sliderVal ?? cur) + 1} / {total}
         </span>
       </footer>
 
