@@ -13,6 +13,9 @@ export const api = {
   pickFile: () => invoke<string | null>("pick_file_app"),
   pickFolder: () => invoke<string | null>("pick_folder_app"),
   listBooks: (folder: string) => invoke<BookMeta[]>("list_books", { folder }),
+  /** Con trực tiếp của 1 thư mục (màn "Thư mục", v0.3.3). */
+  listFolder: (path: string) =>
+    invoke<import("../types").FolderEntry[]>("list_folder", { path }),
   fileMetadata: (path: string) => invoke<BookMeta>("file_metadata", { path }),
   cbzIndex: (path: string) => invoke<string[]>("cbz_index", { path }),
   cbzPage: (path: string, index: number) =>
