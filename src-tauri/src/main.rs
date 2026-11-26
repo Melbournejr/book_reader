@@ -5,7 +5,7 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs::File,
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
@@ -45,6 +45,17 @@ pub struct CbzPage {
 
 pub struct AppState {
     pub db_path: Mutex<PathBuf>,
+    /// Cache chỉ mục CBZ theo đường dẫn (xem cbz_entries): đọc 1 lần rồi
+    /// dùng lại cho mọi trang, tránh quét lại cả file mỗi lần lật trang.
+    pub cbz_cache: Mutex<HashMap<String, CbzIndexCache>>,
+}
+
+/// Chỉ mục CBZ đã sắp xếp tự nhiên: (chỉ số trong ZIP, tên file).
+/// Khóa theo (kích thước, thời gian sửa) — file đổi thì đọc lại.
+pub struct CbzIndexCache {
+    pub size: u64,
+    pub modified: u64,
+    pub entries: Vec<(usize, String)>,
 }
 
 const IMAGE_EXTS: [&str; 6] = ["jpg", "jpeg", "png", "webp", "gif", "avif"];
@@ -159,23 +170,71 @@ fn list_books(folder: String) -> Result<Vec<BookMeta>, String> {
 
 // ---------- CBZ: đọc lười từng trang ----------
 
-/// Đọc chỉ mục ZIP: chỉ tên file ảnh, sắp xếp tự nhiên (page1, page2, page10...).
-/// Không giải nén gì cả.
-#[tauri::command]
-fn cbz_index(path: String) -> Result<Vec<String>, String> {
-    let f = File::open(&path).map_err(|e| e.to_string())?;
+/// Chỉ mục CBZ (đã sắp xếp tự nhiên theo tên: page1, page2, page10...).
+/// Đọc thật từ file đúng 1 lần rồi cache theo (đường dẫn, kích thước,
+/// thời gian sửa); các lần sau dùng lại — KHÔNG quét lại file.
+///
+/// Trước v0.3.2, mỗi lần nạp 1 trang (`cbz_page`) đều chạy lại toàn bộ
+/// hàm này (mở file + `by_index` từng entry + sắp xếp) rồi mới giải nén
+/// trang đó; mở 1 file CBZ 300MB là 4 lần quét, mỗi lần lật trang lại
+/// quét thêm — trên ổ chậm là đơ cứng cả app ("not responding").
+fn cbz_entries(state: &State<AppState>, path: &str) -> Result<Vec<(usize, String)>, String> {
+    let m = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    let size = m.len();
+    let modified = m
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    {
+        let cache = state.cbz_cache.lock().map_err(|e| e.to_string())?;
+        if let Some(c) = cache.get(path) {
+            if c.size == size && c.modified == modified {
+                return Ok(c.entries.clone());
+            }
+        }
+    }
+    let f = File::open(path).map_err(|e| e.to_string())?;
     let mut zip = ZipArchive::new(f).map_err(|e| e.to_string())?;
-    let mut names: Vec<String> = (0..zip.len())
-        .filter_map(|i| zip.by_index(i).ok().map(|f| f.name().to_string()))
-        .filter(|n| {
+    let mut entries: Vec<(usize, String)> = (0..zip.len())
+        .filter_map(|i| zip.by_index(i).ok().map(|f| (i, f.name().to_string())))
+        .filter(|(_, n)| {
             let lower = n.to_lowercase();
             IMAGE_EXTS.iter().any(|e| lower.ends_with(e))
                 && !lower.contains("__macosx")
                 && !lower.ends_with("comicinfo.xml")
         })
         .collect();
-    names.sort_by(|a, b| natural_cmp(a, b));
-    Ok(names)
+    entries.sort_by(|a, b| natural_cmp(&a.1, &b.1));
+    {
+        let mut cache = state.cbz_cache.lock().map_err(|e| e.to_string())?;
+        if cache.len() >= 8 {
+            // Giữ cache gọn: quá 8 file thì dọn bớt 1 mục cũ bất kỳ.
+            if let Some(k) = cache.keys().next().cloned() {
+                cache.remove(&k);
+            }
+        }
+        cache.insert(
+            path.to_string(),
+            CbzIndexCache {
+                size,
+                modified,
+                entries: entries.clone(),
+            },
+        );
+    }
+    Ok(entries)
+}
+
+/// Đọc chỉ mục ZIP: chỉ tên file ảnh, sắp xếp tự nhiên (page1, page2, page10...).
+/// Không giải nén gì cả.
+#[tauri::command]
+fn cbz_index(state: State<AppState>, path: String) -> Result<Vec<String>, String> {
+    Ok(cbz_entries(&state, &path)?
+        .into_iter()
+        .map(|(_, n)| n)
+        .collect())
 }
 
 fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
@@ -213,13 +272,20 @@ fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
 
 /// Đọc ĐÚNG 1 trang ảnh trong CBZ, trả về data URL base64.
 /// File gốc không bao giờ bị copy hay sửa.
+/// Dùng chỉ mục đã cache (xem cbz_entries) + `by_index` thẳng tới entry —
+/// không quét lại file, không tìm tên tuyến tính như trước v0.3.2.
 #[tauri::command]
-fn cbz_page(path: String, index: usize) -> Result<CbzPage, String> {
-    let names = cbz_index(path.clone())?;
-    let name = names.get(index).ok_or("Trang không tồn tại")?.clone();
+fn cbz_page(state: State<AppState>, path: String, index: usize) -> Result<CbzPage, String> {
+    let entries = cbz_entries(&state, &path)?;
+    let total = entries.len();
+    let (archive_idx, name) = entries
+        .get(index)
+        .ok_or("Trang không tồn tại")?
+        .clone();
+    drop(entries);
     let f = File::open(&path).map_err(|e| e.to_string())?;
     let mut zip = ZipArchive::new(f).map_err(|e| e.to_string())?;
-    let mut entry = zip.by_name(&name).map_err(|e| e.to_string())?;
+    let mut entry = zip.by_index(archive_idx).map_err(|e| e.to_string())?;
     let mut buf = Vec::new();
     entry.read_to_end(&mut buf).map_err(|e| e.to_string())?;
     let mime = match ext_of(Path::new(&name)).as_str() {
@@ -233,7 +299,7 @@ fn cbz_page(path: String, index: usize) -> Result<CbzPage, String> {
         data_url: format!("data:{};base64,{}", mime, B64.encode(&buf)),
         name,
         index,
-        total: names.len(),
+        total,
     })
 }
 
@@ -395,6 +461,7 @@ fn main() {
             db::init(&db_path).expect("không khởi tạo được SQLite");
             app.manage(AppState {
                 db_path: Mutex::new(db_path),
+                cbz_cache: Mutex::new(HashMap::new()),
             });
             Ok(())
         })
