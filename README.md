@@ -196,6 +196,16 @@ không có đọc manga phải → trái. Bản này sửa cả 3 + làm lại g
   không, lật còn ngược không (nhất là truyện ảnh CBZ), manga lật đúng
   chiều + đúng trang chưa, menu mở/đóng có mượt không.
 
+### v0.3.3 — màn "Thư mục": duyệt cây thư mục như Explorer (26/11/2026)
+Thiện cần duyệt thư mục truyện theo từng tầng (Truyện tranh → Hesman →
+Hesman.2 → từng file PDF...) chứ không phải thêm thư mục to là app đổ
+tất cả sách vào 1 danh sách phẳng. Mới: mục "Thư mục" ở sidebar; lệnh Rust
+`list_folder` liệt kê con trực tiếp của 1 thư mục (thư mục con trước rồi
+tới file sách, mỗi nhóm sắp theo tên, không đệ quy); màn FolderTree hiển
+thị breadcrumb + nút "Lên", bấm thư mục để đi vào, bấm sách để mở đọc.
+Thư viện phẳng cũ vẫn giữ nguyên. Màn này dùng chung thư mục gốc đã chọn
+ở Nguồn sách; chưa chọn thì có nút chọn thư mục.
+
 ### v0.3.2 — CBZ lớn (~300MB) hết đơ + lật trang mượt (26/11/2026)
 Thiện báo: mở file CBZ tầm 300MB thì app đơ cứng, Windows hiện "Mio Reader
 is not responding"; lật trang lag giật. Nguyên nhân chính ở backend Rust:
