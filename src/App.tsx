@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { TelegramClient } from "telegram";
 import { api } from "./lib/api";
 import type {
@@ -18,21 +18,37 @@ import Reader, {
   type ReaderSearchApi,
   type ReaderThumbApi,
 } from "./components/Reader";
+import StatsView from "./components/StatsView";
+import SourcesView from "./components/SourcesView";
 import UpdateBanner from "./components/UpdateBanner";
 import { parseMobi } from "./lib/mobi";
 import { readFileBytes } from "./lib/files";
 import { searchTextPages, stripHtml } from "./lib/search";
 import { downscaleDataUrl } from "./lib/thumbs";
-
-// Telegram (GramJS) KHÔNG import tĩnh ở đây: GramJS cần Node (net/socket)
-// mà WebView của Tauri không có, import tĩnh làm cả app trắng màn hình
-// (bản 0.1.0). Panel Telegram chỉ nạp khi mở tab, qua dynamic import.
-const TelegramPanel = lazy(() => import("./components/TelegramPanel"));
+import { resolveInitialRtl } from "./lib/spread";
+import { APP_VERSION } from "./lib/update";
 
 type OpenBook =
   | { kind: "local"; meta: BookMeta; startPage: number }
   | { kind: "telegram"; file: TelegramFile; client: TelegramClient; startPage: number }
   | null;
+
+type Screen = "library" | "stats" | "sources";
+
+function formatSize(bytes: number): string {
+  if (!bytes) return "";
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / 1073741824).toFixed(1)} GB`;
+  if (bytes >= 1024 * 1024) return `${(bytes / 1048576).toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+
+function loadStored(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
 
 export default function App() {
   const [history, setHistory] = useState<HistoryEntry[]>([]);
@@ -51,6 +67,8 @@ export default function App() {
   const pdfHlRef = useRef<{ page: number; rects: PdfRect[] } | null>(null);
   const [title, setTitle] = useState("");
   const [loading, setLoading] = useState("");
+  /** Mặc định RTL chung cho sách chưa có cài đặt riêng (Cài đặt).
+   *  Truyện tranh (CBZ/CBR) thì auto-RTL khi mở, xem resolveInitialRtl. */
   const [rtl, setRtl] = useState(false);
   /** Dọn dẹp sách đang mở (đóng PDF...) khi thoát khỏi trình đọc. */
   const cleanupRef = useRef<(() => void) | null>(null);
@@ -67,6 +85,36 @@ export default function App() {
     total: number;
   } | null>(null);
 
+  // ---- v0.3.0: màn hình chính (thư viện / thống kê / nguồn sách) ----
+  const [screen, setScreen] = useState<Screen>("library");
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [localFolder, setLocalFolder] = useState<string | null>(() =>
+    loadStored("mio-local-folder"),
+  );
+  const [opdsPaths, setOpdsPaths] = useState<string[]>(() => {
+    try {
+      const raw = loadStored("mio-opds-paths");
+      const arr = raw ? (JSON.parse(raw) as unknown) : [];
+      return Array.isArray(arr) ? arr.filter((x): x is string => typeof x === "string") : [];
+    } catch {
+      return [];
+    }
+  });
+  const [bookmarkCount, setBookmarkCount] = useState(0);
+
+  const telegramHistory = useMemo(
+    () => history.filter((h) => h.source === "telegram"),
+    [history],
+  );
+  const continueBook = useMemo(
+    () => history.find((h) => h.status === "reading") ?? null,
+    [history],
+  );
+  const totalSize = useMemo(
+    () => localBooks.reduce((a, b) => a + (b.size || 0), 0),
+    [localBooks],
+  );
+
   const reloadStats = useCallback(async () => {
     try {
       setStatsSummary(await api.statsSummary());
@@ -80,6 +128,18 @@ export default function App() {
   useEffect(() => {
     void reloadStats();
   }, [reloadStats]);
+
+  const reloadBookmarkCount = useCallback(async () => {
+    try {
+      setBookmarkCount(await api.bookmarksBookCount());
+    } catch {
+      setBookmarkCount(0);
+    }
+  }, []);
+
+  useEffect(() => {
+    void reloadBookmarkCount();
+  }, [reloadBookmarkCount]);
 
   /** Ghi phiên đọc vừa xong vào SQLite (quá ngắn + không lật trang nào thì bỏ qua). */
   const flushSession = useCallback(async () => {
@@ -123,7 +183,7 @@ export default function App() {
     };
   }, [open, reader, flushSession, reloadStats]);
 
-  /** Cài đặt riêng cuốn này đã lưu (zoom/fit/crop/2-trang), hỏng thì mặc định. */
+  /** Cài đặt riêng cuốn này đã lưu (zoom/fit/crop/2-trang...), hỏng thì mặc định. */
   const loadSettings = async (id: string): Promise<ReaderSettings | null> => {
     try {
       const raw = await api.historySettingsGet(id);
@@ -146,6 +206,16 @@ export default function App() {
   useEffect(() => {
     void reloadHistory();
   }, [reloadHistory]);
+
+  // Nhớ thư mục đã chọn lần trước: mở app lên là kệ có sẵn sách.
+  useEffect(() => {
+    const f = loadStored("mio-local-folder");
+    if (!f) return;
+    api
+      .listBooks(f)
+      .then((books) => setLocalBooks(books))
+      .catch(() => setLocalBooks([]));
+  }, []);
 
   const saveProgress = useCallback(
     async (id: string, page: number, totalPages: number, extra: Partial<HistoryEntry> = {}) => {
@@ -436,11 +506,21 @@ export default function App() {
 
   const resume = async (h: HistoryEntry) => {
     if (h.source === "local" && h.path) {
-      const meta = await api.fileMetadata(h.path);
-      await openLocal(meta, h.current_page);
+      try {
+        const meta = await api.fileMetadata(h.path);
+        await openLocal(meta, h.current_page);
+      } catch {
+        setLoading("Không mở được — file đã bị dời hoặc xóa. Bấm vào sách đó trong thư viện để chỉ lại đường dẫn.");
+      }
     } else {
-      setLoading("Sách Telegram: mở lại từ tab Telegram bên dưới để tải trang theo byte-range.");
+      // Sách Telegram: mở lại từ màn Nguồn sách (panel Telegram giữ client).
+      setScreen("sources");
     }
+  };
+
+  const resumeById = async (bookId: string) => {
+    const h = history.find((x) => x.id === bookId);
+    if (h) await resume(h);
   };
 
   const relink = async (h: HistoryEntry) => {
@@ -451,86 +531,246 @@ export default function App() {
     }
   };
 
+  const pickFile = async () => {
+    const p = await api.pickFile();
+    if (p) {
+      const meta = await api.fileMetadata(p);
+      await openLocal(meta);
+    }
+  };
+
+  const pickFolder = async () => {
+    const f = await api.pickFolder();
+    if (f) {
+      setLocalFolder(f);
+      try {
+        localStorage.setItem("mio-local-folder", f);
+      } catch {
+        // Bỏ qua lỗi lưu.
+      }
+      setLocalBooks(await api.listBooks(f));
+    }
+  };
+
+  const openDownloaded = async (path: string) => {
+    setOpdsPaths((prev) => {
+      if (prev.includes(path)) return prev;
+      const next = [...prev, path];
+      try {
+        localStorage.setItem("mio-opds-paths", JSON.stringify(next));
+      } catch {
+        // Bỏ qua lỗi lưu.
+      }
+      return next;
+    });
+    const meta = await api.fileMetadata(path);
+    await openLocal(meta);
+  };
+
+  const closeReader = useCallback(() => {
+    cleanupRef.current?.();
+    cleanupRef.current = null;
+    ttsTextRef.current = null;
+    pdfHlRef.current = null;
+    setJumpRequest(null);
+    setInitialSettings(null);
+    setOpen(null);
+    setReader(null);
+    void reloadHistory();
+    void reloadBookmarkCount();
+  }, [reloadHistory, reloadBookmarkCount]);
+
+  // Thông tin sách cho menu ⋯ trong trình đọc.
+  const bookInfo = useMemo(() => {
+    if (!open) return "";
+    if (open.kind === "local") {
+      return `${open.meta.format.toUpperCase()} · ${formatSize(open.meta.size)}`;
+    }
+    return `CBZ · ${formatSize(open.file.size)} · Telegram`;
+  }, [open]);
+
+  const readerRtl = open
+    ? resolveInitialRtl(
+        open.kind === "local" ? open.meta.format : "cbz",
+        initialSettings?.rtl,
+        rtl,
+      )
+    : rtl;
+
   return (
-    <main>
-      <header className="topbar">
-        <h1>Mio Reader</h1>
-        <label title="Mặc định cho sách chưa có cài đặt riêng — đổi trong trình đọc (menu ⋯) thì nhớ theo từng cuốn">
-          <input type="checkbox" checked={rtl} onChange={(e) => setRtl(e.target.checked)} />
-          Manga phải → trái (mặc định)
-        </label>
-      </header>
-      {loading && <p className="status">{loading}</p>}
-      <UpdateBanner />
-      {open && reader ? (
-        <Reader
-          title={title}
-          bookId={open.kind === "local" ? open.meta.id : `tg:${open.file.file_id}`}
-          format={open.kind === "local" ? open.meta.format : "cbz"}
-          total={reader.total}
-          initialPages={reader.initialPages}
-          loadPage={reader.loadPage}
-          startPage={open.startPage}
-          rtl={rtl}
-          onProgress={(page, total) => {
-            const id =
-              open.kind === "local" ? open.meta.id : `tg:${open.file.file_id}`;
-            if (sessionRef.current) {
-              sessionRef.current.maxPage = Math.max(sessionRef.current.maxPage, page);
-            }
-            void saveProgress(id, page, total);
+    <div className="app-shell">
+      <aside className="sidebar">
+        <div className="brand">
+          <span className="brand-mark">M</span>
+          <span>
+            <span className="brand-name">Mio Reader</span>
+            <br />
+            <span className="brand-sub">Đọc sách &amp; truyện</span>
+          </span>
+        </div>
+        <button
+          className={`nav-item${screen === "library" && !open ? " active" : ""}`}
+          onClick={() => setScreen("library")}
+        >
+          <span className="nic">📚</span> Thư viện
+          <span className="cnt">{localBooks.length + telegramHistory.length}</span>
+        </button>
+        <button
+          className="nav-item"
+          onClick={() => {
+            if (continueBook) void resume(continueBook);
+            else setScreen("library");
           }}
-          onClose={() => {
-            cleanupRef.current?.();
-            cleanupRef.current = null;
-            ttsTextRef.current = null;
-            pdfHlRef.current = null;
-            setJumpRequest(null);
-            setInitialSettings(null);
-            setOpen(null);
-            setReader(null);
-            void reloadHistory();
-          }}
-          searchApi={reader.searchApi}
-          thumbApi={reader.thumbApi}
-          initialSettings={initialSettings}
-          jumpRequest={jumpRequest}
-          ttsTextForPage={(page) => ttsTextRef.current?.(page) ?? Promise.resolve(null)}
-        />
-      ) : (
-        <>
+        >
+          <span className="nic">▶</span> Đang đọc
+        </button>
+        <button
+          className={`nav-item${screen === "stats" && !open ? " active" : ""}`}
+          onClick={() => setScreen("stats")}
+        >
+          <span className="nic">📊</span> Thống kê
+        </button>
+        <button
+          className={`nav-item${screen === "sources" && !open ? " active" : ""}`}
+          onClick={() => setScreen("sources")}
+        >
+          <span className="nic">🌐</span> Nguồn sách
+        </button>
+        <div className="side-label">Kệ của tôi</div>
+        <button className="nav-item" onClick={() => setScreen("library")}>
+          <span className="nic">🔖</span> Đã đánh dấu
+          <span className="cnt">{bookmarkCount}</span>
+        </button>
+        <button className="nav-item" onClick={() => setScreen("library")}>
+          <span className="nic">⬇</span> Đã tải xuống
+          <span className="cnt">{localBooks.length}</span>
+        </button>
+        <div className="side-foot">
+          <button className="nav-item" onClick={() => setSettingsOpen(true)}>
+            <span className="nic">⚙</span> Cài đặt
+          </button>
+          <div className="storage-bar">
+            <i style={{ width: `${Math.min(100, (totalSize / (5 * 1073741824)) * 100)}%` }} />
+          </div>
+          <div className="storage-txt">
+            Kệ sách: {formatSize(totalSize) || "0 KB"} · {localBooks.length} cuốn
+          </div>
+        </div>
+      </aside>
+
+      <div className="main">
+        {loading && <div className="loading-bar">{loading}</div>}
+        {open && reader ? (
+          <Reader
+            title={title}
+            bookId={open.kind === "local" ? open.meta.id : `tg:${open.file.file_id}`}
+            format={open.kind === "local" ? open.meta.format : "cbz"}
+            total={reader.total}
+            initialPages={reader.initialPages}
+            loadPage={reader.loadPage}
+            startPage={open.startPage}
+            rtl={readerRtl}
+            onProgress={(page, total) => {
+              const id =
+                open.kind === "local" ? open.meta.id : `tg:${open.file.file_id}`;
+              if (sessionRef.current) {
+                sessionRef.current.maxPage = Math.max(sessionRef.current.maxPage, page);
+              }
+              void saveProgress(id, page, total);
+            }}
+            onClose={closeReader}
+            searchApi={reader.searchApi}
+            thumbApi={reader.thumbApi}
+            initialSettings={initialSettings}
+            jumpRequest={jumpRequest}
+            ttsTextForPage={(page) => ttsTextRef.current?.(page) ?? Promise.resolve(null)}
+            bookInfo={bookInfo}
+            onOpenStats={() => {
+              closeReader();
+              setScreen("stats");
+            }}
+          />
+        ) : screen === "library" ? (
           <Library
-            history={history}
             localBooks={localBooks}
-            statsSummary={statsSummary}
-            statsPerBook={statsPerBook}
+            history={history}
+            opdsPaths={opdsPaths}
+            continueBook={continueBook}
             onOpenLocal={(b) => void openLocal(b)}
+            onPickFile={() => void pickFile()}
+            onPickFolder={() => void pickFolder()}
             onResume={(h) => void resume(h)}
+            onOpenSources={() => setScreen("sources")}
             onRelink={(h) => void relink(h)}
             onRemoveHistory={(id) => {
               void api.historyDelete(id).then(() => reloadHistory());
             }}
-            onPickFile={async () => {
-              const p = await api.pickFile();
-              if (p) {
-                const meta = await api.fileMetadata(p);
-                await openLocal(meta);
-              }
-            }}
-            onPickFolder={async () => {
-              const f = await api.pickFolder();
-              if (f) setLocalBooks(await api.listBooks(f));
-            }}
-            onOpenDownloaded={async (path) => {
-              const meta = await api.fileMetadata(path);
-              await openLocal(meta);
-            }}
           />
-          <Suspense fallback={<p className="status">Đang tải tab Telegram…</p>}>
-            <TelegramPanel onOpenTelegramBook={(f, c) => void openTelegram(f, c)} />
-          </Suspense>
+        ) : screen === "stats" ? (
+          <StatsView
+            summary={statsSummary}
+            perBook={statsPerBook}
+            history={history}
+            onResume={(id) => void resumeById(id)}
+          />
+        ) : (
+          <SourcesView
+            localFolder={localFolder}
+            localCount={localBooks.length}
+            onPickFolder={() => void pickFolder()}
+            onOpenTelegramBook={(f, c) => void openTelegram(f, c)}
+            onOpenDownloaded={(path) => openDownloaded(path)}
+          />
+        )}
+      </div>
+
+      {settingsOpen && (
+        <>
+          <div className="scrim" onClick={() => setSettingsOpen(false)} />
+          <aside className="sheet" role="dialog" aria-label="Cài đặt">
+            <div className="sheet-head">
+              <h2>Cài đặt</h2>
+              <button className="x" onClick={() => setSettingsOpen(false)} aria-label="Đóng">
+                ✕
+              </button>
+            </div>
+            <div className="sheet-body">
+              <p className="mgroup">Đọc sách</p>
+              <div className="settings-row">
+                <span className="sr-label">
+                  <span className="t">Manga phải → trái (mặc định)</span>
+                  <br />
+                  <span className="d">
+                    Áp dụng cho sách chưa có cài đặt riêng. Truyện tranh
+                    (CBZ/CBR) thì mặc định đã bật RTL khi mở.
+                  </span>
+                </span>
+                <button
+                  className={`switch${rtl ? " on" : ""}`}
+                  role="switch"
+                  aria-checked={rtl}
+                  aria-label="Manga phải sang trái mặc định"
+                  onClick={() => setRtl((v) => !v)}
+                />
+              </div>
+              <p className="mgroup">Cập nhật</p>
+              <UpdateBanner />
+              <p className="mgroup">Giới thiệu</p>
+              <div className="settings-row">
+                <span className="sr-label">
+                  <span className="t">Mio Reader v{APP_VERSION}</span>
+                  <br />
+                  <span className="d">
+                    Đọc sách &amp; truyện trên PC — đọc trực tiếp từ ổ cứng,
+                    không nhân bản file. Lịch sử &amp; thống kê chỉ lưu trên
+                    máy này.
+                  </span>
+                </span>
+              </div>
+            </div>
+          </aside>
         </>
       )}
-    </main>
+    </div>
   );
 }

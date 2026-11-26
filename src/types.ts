@@ -82,6 +82,16 @@ export interface StatsSummary {
   total_sessions: number;
   books_finished: number;
   days: number[];
+  /** Tổng theo từng ngày (14 ngày gần nhất, mới nhất trước):
+   *  phục vụ biểu đồ tuần + so sánh với tuần trước (v0.3.0). */
+  per_day: StatsDay[];
+}
+
+/** Tổng đọc của 1 ngày (ngày UTC = started_at / 86_400_000). */
+export interface StatsDay {
+  day: number;
+  seconds: number;
+  pages: number;
 }
 
 /** Thống kê theo từng cuốn (kể cả cuốn chưa có phiên nào: toàn 0). */
@@ -127,6 +137,14 @@ export interface ReaderSettings {
   crop?: CropMargins;
   twoPage?: boolean; // nhớ chế độ 1/2 trang của cuốn này
   rtl?: boolean; // nhớ chế độ manga phải → trái của cuốn này
+  /** Cỡ chữ sách chữ (EPUB/MOBI), px — mặc định 15.5 theo thiết kế v0.3.0. */
+  fontSize?: number;
+  /** Giãn dòng sách chữ — mặc định 1.78 theo thiết kế v0.3.0. */
+  lineHeight?: number;
+  /** true = chữ sans (Be Vietnam Pro), false = serif (Noto Serif). */
+  fontSans?: boolean;
+  /** Nền trang sách chữ: sáng / giấy / đêm. */
+  pageTheme?: "light" | "paper" | "night";
 }
 
 export const HIGHLIGHT_COLORS: Record<string, string> = {
