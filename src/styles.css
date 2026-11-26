@@ -742,3 +742,25 @@ h1, h2, h3 { font-family: var(--font-serif); }
   flex: 1; display: flex; align-items: center; justify-content: center;
   padding: 24px; text-align: center; color: var(--muted);
 }
+
+/* ---- Màn "Thư mục" (v0.3.3): cây thư mục như Explorer ---- */
+.ft-wrap { padding: 20px 26px 32px; max-width: 860px; }
+.ft-wrap h1 { font-family: var(--font-serif); font-size: 26px; margin: 0 0 4px; }
+.ft-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.ft-crumbs { display: flex; align-items: center; flex-wrap: wrap; gap: 2px; margin: 10px 0 14px; color: var(--muted); font-size: 13px; }
+.ft-crumb { background: none; border: none; color: var(--accent-ink); padding: 2px 4px; font-size: 13px; cursor: pointer; }
+.ft-crumb:hover { text-decoration: underline; }
+.ft-crumb-now { color: var(--ink); font-weight: 600; padding: 2px 4px; }
+.ft-sep { color: var(--muted); }
+.ft-up { background: var(--surface2); border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px; margin-right: 8px; font-size: 12px; cursor: pointer; }
+.ft-list { border-top: 1px solid var(--line); }
+.ft-group { padding: 12px 4px 4px; font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.ft-row { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; background: none; border: none; border-bottom: 1px solid var(--line); padding: 9px 6px; font-size: 14px; cursor: pointer; color: var(--ink); }
+.ft-row:hover { background: var(--surface2); }
+.ft-ico { font-size: 16px; }
+.ft-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ft-folder .ft-name { font-weight: 600; }
+.ft-go { color: var(--muted); font-size: 18px; }
+.ft-badge { flex: none; font-size: 10px; font-weight: 700; letter-spacing: 0.03em; color: var(--accent-ink); background: #f3ddd2; border-radius: 4px; padding: 2px 5px; }
+.ft-size { flex: none; color: var(--muted); font-size: 12px; }
+.ft-empty { color: var(--muted); padding: 18px 4px; line-height: 1.6; }

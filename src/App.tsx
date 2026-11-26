@@ -19,6 +19,7 @@ import Reader, {
   type ReaderThumbApi,
 } from "./components/Reader";
 import StatsView from "./components/StatsView";
+import FolderTree from "./components/FolderTree";
 import SourcesView from "./components/SourcesView";
 import UpdateBanner from "./components/UpdateBanner";
 import { parseMobi } from "./lib/mobi";
@@ -33,7 +34,7 @@ type OpenBook =
   | { kind: "telegram"; file: TelegramFile; client: TelegramClient; startPage: number }
   | null;
 
-type Screen = "library" | "stats" | "sources";
+type Screen = "library" | "folders" | "stats" | "sources";
 
 function formatSize(bytes: number): string {
   if (!bytes) return "";
@@ -616,6 +617,12 @@ export default function App() {
           <span className="cnt">{localBooks.length + telegramHistory.length}</span>
         </button>
         <button
+          className={`nav-item${screen === "folders" && !open ? " active" : ""}`}
+          onClick={() => setScreen("folders")}
+        >
+          <span className="nic">🗂</span> Thư mục
+        </button>
+        <button
           className="nav-item"
           onClick={() => {
             if (continueBook) void resume(continueBook);
@@ -705,6 +712,12 @@ export default function App() {
             onRemoveHistory={(id) => {
               void api.historyDelete(id).then(() => reloadHistory());
             }}
+          />
+        ) : screen === "folders" ? (
+          <FolderTree
+            root={localFolder}
+            onPickFolder={() => void pickFolder()}
+            onOpenLocal={(b) => void openLocal(b)}
           />
         ) : screen === "stats" ? (
           <StatsView

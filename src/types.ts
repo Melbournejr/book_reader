@@ -9,6 +9,14 @@ export interface BookMeta {
   id: string;
 }
 
+/** Một mục trong cây thư mục (màn "Thư mục", v0.3.3). */
+export interface FolderEntry {
+  name: string;
+  path: string;
+  is_folder: boolean;
+  meta: BookMeta | null;
+}
+
 export interface HistoryEntry {
   id: string;
   source: Source;
