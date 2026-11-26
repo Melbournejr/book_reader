@@ -17,4 +17,4 @@ authors = ["Thiện"]
 description = "Đọc sách/truyện trực tiếp từ file trên máy, không clone file. Lịch sử đọc lưu SQLite local. Nguồn Telegram (MTProto) đọc theo byte-range."
 edition = "2021"
 name = "phan-mem-doc-sach-desktop"
-version = "0.3.1"
+version = "0.3.2"
