@@ -662,6 +662,7 @@ export default function App() {
           <div className="storage-txt">
             Kệ sách: {formatSize(totalSize) || "0 KB"} · {localBooks.length} cuốn
           </div>
+          <div className="storage-txt">Mio Reader v{APP_VERSION}</div>
         </div>
       </aside>
 

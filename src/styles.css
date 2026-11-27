@@ -376,6 +376,9 @@ h1, h2, h3 { font-family: var(--font-serif); }
    vẫn bôi đen chữ làm gạch chân / tra từ được. */
 .spread.img-book, .spread.img-book * { user-select: none; -webkit-user-select: none; }
 .spread.img-book .page-img { -webkit-user-drag: none; }
+/* v0.3.6: chặn bôi đen ngay tại từng slot ảnh — lớp dự phòng thứ 2, chặn
+   cả khi .spread.img-book vì lý do nào đó không chặn được. */
+.page-slot.img, .page-slot.img * { user-select: none; -webkit-user-select: none; }
 
 /* Lá lật (giữ nguyên mô hình v0.2.0: mặt sau mirrored=false — xem spread.ts) */
 .curl-leaf {
