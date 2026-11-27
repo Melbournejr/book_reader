@@ -431,6 +431,22 @@ export default function Reader({
     return () => ro.disconnect();
   }, []);
 
+  // v0.3.6: chặn bôi đen / kéo-thả native ngay tại sự kiện (truyện tranh)
+  // — lớp chặn thứ 2 sau CSS user-select:none. React không có prop
+  // onSelectStart cho div nên gắn trực tiếp. Sách chữ không chặn để vẫn
+  // bôi đen làm gạch chân / tra từ được.
+  useEffect(() => {
+    const el = spreadRef.current;
+    if (!el || !useAspectSlots) return;
+    const block = (e: Event) => e.preventDefault();
+    el.addEventListener("selectstart", block);
+    el.addEventListener("dragstart", block);
+    return () => {
+      el.removeEventListener("selectstart", block);
+      el.removeEventListener("dragstart", block);
+    };
+  }, [useAspectSlots]);
+
   // Ctrl + lăn chuột để zoom (listener không passive để chặn cuộn mặc định).
   useEffect(() => {
     const el = viewportRef.current;
@@ -1049,6 +1065,9 @@ export default function Reader({
     if (!leaf) return;
     dragRef.current = { grabX: e.clientX, grabY: e.clientY, dir, spineLeft: leaf.spineLeft, next: leaf.next, rect };
     busyRef.current = true;
+    // v0.3.6: xóa bôi đen cũ ngay khi bắt đầu kéo — bôi đen cũ còn sót
+    // sẽ nhuộm trang xanh (lỗi Thiện báo ở v0.3.5 vẫn còn y như v0.3.4).
+    try { window.getSelection()?.removeAllRanges(); } catch { /* bỏ qua */ }
     curlRef.current = { dir, spineLeft: leaf.spineLeft, next: leaf.next, front: leaf.front, back: leaf.back };
     setCurlTarget(leaf.next);
     const dest = spreadSides(leaf.next, twoPage, rtl, total);
@@ -1080,6 +1099,8 @@ export default function Reader({
   const onPointerUp = (e: React.PointerEvent) => {
     if (panRef.current) {
       panRef.current = null;
+      // Kéo rê khi zoom cũng có thể để lại bôi đen — xóa luôn.
+      try { window.getSelection()?.removeAllRanges(); } catch { /* bỏ qua */ }
       return;
     }
     const d = dragRef.current;
@@ -1411,7 +1432,7 @@ export default function Reader({
                 />
               ) : (
                 <div
-                  className={`page-slot ${twoPage ? "left" : "single"}${bookmarks.some((b) => b.page === leftIndex) ? " bookmarked" : ""}`}
+                  className={`page-slot ${twoPage ? "left" : "single"}${left?.isImage ? " img" : ""}${bookmarks.some((b) => b.page === leftIndex) ? " bookmarked" : ""}`}
                   style={useAspectSlots ? { flex: "none", width: leftSlotW } : undefined}
                   onPointerDown={(e) => onPointerDown(e, rtl ? 1 : -1, "left")}
                   onPointerMove={onPointerMove}
@@ -1428,7 +1449,7 @@ export default function Reader({
                   />
                 ) : (
                   <div
-                    className={`page-slot right${bookmarks.some((b) => b.page === rightIndex) ? " bookmarked" : ""}`}
+                    className={`page-slot right${right?.isImage ? " img" : ""}${bookmarks.some((b) => b.page === rightIndex) ? " bookmarked" : ""}`}
                     style={useAspectSlots ? { flex: "none", width: rightSlotW } : undefined}
                     onPointerDown={(e) => onPointerDown(e, rtl ? -1 : 1, "right")}
                     onPointerMove={onPointerMove}
