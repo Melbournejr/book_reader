@@ -196,6 +196,19 @@ không có đọc manga phải → trái. Bản này sửa cả 3 + làm lại g
   không, lật còn ngược không (nhất là truyện ảnh CBZ), manga lật đúng
   chiều + đúng trang chưa, menu mở/đóng có mượt không.
 
+### v0.3.5 — hết trang xanh lè khi kéo lật + chạm để lật trang (27/11/2026)
+Thiện gửi video: lật truyện thì trang 42 bị nhuộm xanh lè cả trang, kéo
+lật thì nặng, "không thể trải nghiệm nổi". Nguyên nhân: (1) kéo chuột trên
+trang ảnh thì trình duyệt bôi đen cả trang ảnh (ảnh bị nhuộm xanh như khi
+bôi đen chữ), mà bôi đen không tự hết sau khi lật. (2) chạm nhẹ vào trang
+không lật được — phải kéo đủ dài hoặc bấm nút hẹp ở mép. Sửa: (1) spread
+truyện tranh (trang ảnh) cấm bôi đen hoàn toàn (`user-select: none`, chỉ
+áp cho trang ảnh — sách chữ vẫn bôi đen làm gạch chân / tra từ được) và
+xóa mọi bôi đen còn sót sau mỗi lần lật. (2) chạm nhẹ vào trang (< 8px)
+giờ lật trang luôn theo đúng chiều của nửa trang chạm vào. Chưa kiểm bằng
+mắt trên máy thật (không có WebView ở máy này): còn cảm giác kéo/chạm trên
+file thật vẫn cần Thiện thử.
+
 ### v0.3.4 — sửa hiển thị spread truyện tranh + kéo trượt trang mượt (26/11/2026)
 Thiện báo v0.3.3 hiển thị vẫn lỗi: 2 trang truyện có khe đen lớn ở gáy,
 trang nhỏ lọt thỏm giữa nền đen, đáy cửa sổ còn 1 thanh cuộn ngang thừa;
