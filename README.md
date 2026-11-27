@@ -196,6 +196,77 @@ không có đọc manga phải → trái. Bản này sửa cả 3 + làm lại g
   không, lật còn ngược không (nhất là truyện ảnh CBZ), manga lật đúng
   chiều + đúng trang chưa, menu mở/đóng có mượt không.
 
+### v0.3.8 — hết lệch nhãn/ảnh khi lật nhanh: port cơ chế chống lệch của bản web (27/11/2026)
+Thiện gửi video test v0.3.7 (cài sạch, sidebar đã ghi v0.3.7): nhãn
+"Trang 72–73" rồi "Trang 70–71" nhưng 2 trang hiện ra giống hệt nhau
+— lật đổi số trang mà ảnh không đổi. Lần thứ 2 mẫu này xuất hiện (lần
+trước spread 58–59 vs 60–61 cùng ảnh tháp). Điều tra kỹ thì không phải
+"ảnh đứng yên" mà là **nhãn và ảnh BỊ TÁCH RỜI**: cùng nhãn 72–73 hiện
+3 spread khác nhau, cùng 1 spread xuất hiện dưới 2 nhãn (72–73 và
+76–77).
+
+**Gốc lỗi (đã kiểm chứng bằng code):** `<img>` trang không có `key`
+nên React tái dùng cùng node DOM, chỉ đổi `src` sang data-URL base64
+mới (vài MB/trang); trình duyệt giữ ảnh cũ tới khi ảnh mới giải mã
+xong, trong khi nhãn commit tức thì trong `finishFlip`. Lật nhanh thì
+các lần giải mã hoàn thành không theo thứ tự, ảnh hiện ra có thể là
+bất kỳ spread nào vừa lật qua. Bản web tránh được bằng cell có key
+theo chỉ số trang + `ensurePage` trả về pending promise + flip chờ
+giải mã xong mới commit — v0.3.8 port đúng 3 cơ chế đó sang desktop,
+không viết lại:
+
+1. **Cell có key theo chỉ số trang** (Reader.tsx `renderFace` +
+   slot trái/phải + mặt trước/sau của `CurlLeaf`): đổi trang thì
+   mount node DOM mới cho đúng trang đó; trang chưa nạp xong hiện
+   "Đang tải trang…" (chuỗi này đã có sẵn) thay vì ảnh sai.
+2. **`ensure` trả về pending promise** (`src/lib/pending.ts` mới —
+   `PendingMap`, như `pendingRef` của bản web): trang đang inflight
+   thì caller chờ đúng promise đó thay vì tiến hành với trang trống.
+   Trước đây `ensure` bỏ qua trang inflight rồi trả về ngay. `jumpTo`
+   và `commitSlider` (thanh trượt dưới) giờ cũng `await ensure` +
+   `await decodeImages` trước khi đổi spread — trước đây nhảy ngay
+   nên nhãn đổi trước, ảnh về sau.
+3. **Lật chỉ commit sau khi trang đích đã giải mã xong:**
+   `startFlip` và `beginDragFlip` đều `await ensure(dest)` +
+   `await decodeImages(dest)` TRƯỚC khi mount lá và TRƯỚC
+   `finishFlip`; không commit nhãn sớm.
+4. **Bỏ `curlTarget` toàn cục, nền tính theo từng flip**
+   (`src/lib/spread.ts` mới — `flipBaseSides`, như `baseIdxs` của bản
+   web): bên lật lấy trang đích của nó, bên còn lại giữ trang hiện
+   tại (trừ khi đang trống — vd bìa RTL đứng một mình — thì lấy trang
+   đích để không bị trống trong lúc lật); nền dọn cùng lúc với lá.
+   Kích thước slot và hình học lá theo spread HIỆN TẠI (không theo
+   nền đang lật) để slot không đổi rộng giữa chừng làm lá rách.
+5. **Kéo:** `onPointerDown` chỉ ghi nhận `pendingDragRef` (chưa mount
+   lá, chưa khóa lật); mount lá + build flip chỉ sau khi di chuyển
+   >9px (`beginDragFlip`, sau khi decode xong); thả tay giữa lúc
+   đang chờ decode thì hủy mount, không lật. Thêm `onPointerCancel`
+   để dọn `dragRef`/`curl`/`busyRef` khi pointer bị hủy (cửa sổ mất
+   focus...). Slot có key nên node đã capture bị remount khi lá
+   mount — khẳng định lại capture trên node hiện tại mỗi lần di
+   chuyển để thả tay ngoài cửa sổ vẫn nhận.
+6. **Chặn phím lặp:** đã có sẵn từ v0.3.7 (`if (e.repeat) return;`
+   trong handler keydown) — kiểm tra lại, không sửa.
+
+**KHÔNG đổi:** mô hình spread RTL (`spread.ts` giữ nguyên: bìa 0
+đứng một mình bên phải rồi (1,2), (3,4)…) — đổi pairing sẽ lệch vị
+trí đọc đã lưu, cần Thiện đồng ý trước (bước 7, chưa làm). Không đụng
+`curl.ts`, `CurlLeaf.tsx` (hình học lật đã port đúng ở v0.3.7),
+`layout.ts`, số liệu flip (900ms easeOutQuart, settle 170–560ms,
+ngưỡng commit), thứ tự preload, API Rust, fullscreen `immersive`,
+thư viện/cây thư mục/Telegram/OPDS/stats. Toàn bộ tính năng P0–P2
+giữ nguyên.
+
+**Chưa kiểm được bằng mắt** (không có WebView trên máy build): lật
+nhanh qua lại nhiều trang (nhãn và ảnh phải khớp nhau), nghỉ yên 3
+giây sau khi lật (ảnh không được tự đổi), chạm/kéo/phím lật — test
+trên máy Thiện mới là cửa cuối. Test số: 101 (v030) + 13 (v034) + 41
+(v037) + 44 mới (v038: PendingMap dedup/join/lỗi/dọn entry, nền
+từng flip LTR/RTL × 1/2 trang × tới/lui + bìa RTL + gần cuối cuốn
+605 trang, hợp đồng cổng commit) — tất cả pass. Rust không thay đổi
+trong v0.3.8 (chỉ `Cargo.toml` version) — GitHub Actions là cửa kiểm
+cuối cho Rust.
+
 ### v0.3.7 — rà soát toàn bộ + lá lật cong thật + sửa hiển thị full màn (27/11/2026)
 Thiện gửi video test mới: lật trang hiệu ứng cực kém, lật bị lỗi; full
 màn thì spread lệch (trang trái cụt, bên phải đen lớn); cửa sổ thường
