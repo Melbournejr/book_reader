@@ -370,6 +370,13 @@ h1, h2, h3 { font-family: var(--font-serif); }
 .hl-green { background: #b7f0c0; }
 .hl-blue { background: #b3d7ff; }
 
+/* v0.3.5: truyện tranh (trang ảnh) không cho bôi đen — kéo lật mà trình
+   duyệt bôi đen cả trang ảnh thì trang bị nhuộm xanh (video Thiện gửi
+   27/11: trang 42 xanh lè sau khi kéo lật). Sách chữ KHÔNG áp dụng để
+   vẫn bôi đen chữ làm gạch chân / tra từ được. */
+.spread.img-book, .spread.img-book * { user-select: none; -webkit-user-select: none; }
+.spread.img-book .page-img { -webkit-user-drag: none; }
+
 /* Lá lật (giữ nguyên mô hình v0.2.0: mặt sau mirrored=false — xem spread.ts) */
 .curl-leaf {
   position: absolute; top: 0; bottom: 0; z-index: 8;
