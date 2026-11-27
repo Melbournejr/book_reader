@@ -198,3 +198,30 @@ export function isComicFormat(format: string): boolean {
   const f = format.toLowerCase();
   return f === "cbz" || f === "cbr";
 }
+
+/**
+ * Trang nền từng bên trong lúc lật (mô hình bản web: base theo từng flip).
+ *  Bên lật lấy trang đích của nó; bên còn lại giữ trang hiện tại — trừ khi
+ *  bên đó đang trống (vd bìa RTL đứng một mình, trang trái null) thì lấy
+ *  trang đích để không bị trống trong lúc lật. Nền này tính sẵn cho đúng
+ *  cú lật đó và dọn cùng lúc với lá (thay cho curlTarget toàn cục).
+ *  1 trang: nền chỉ có trang đích.
+ */
+export function flipBaseSides(
+  leaf: LeafFlip,
+  spreadStart: number,
+  twoPage: boolean,
+  rtl: boolean,
+  total: number,
+): { left: number | null; right: number | null } {
+  const curSides = spreadSides(spreadStart, twoPage, rtl, total);
+  const nextSides = spreadSides(leaf.next, twoPage, rtl, total);
+  if (!twoPage) return { left: leaf.next, right: null };
+  const frontIsLeft = curSides.left === leaf.front;
+  const pick = (side: "left" | "right"): number | null => {
+    const isTurningSide = side === "left" ? frontIsLeft : !frontIsLeft;
+    if (isTurningSide) return nextSides[side];
+    return curSides[side] ?? nextSides[side];
+  };
+  return { left: pick("left"), right: pick("right") };
+}
