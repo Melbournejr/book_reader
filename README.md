@@ -196,6 +196,62 @@ không có đọc manga phải → trái. Bản này sửa cả 3 + làm lại g
   không, lật còn ngược không (nhất là truyện ảnh CBZ), manga lật đúng
   chiều + đúng trang chưa, menu mở/đóng có mượt không.
 
+### v0.3.7 — rà soát toàn bộ + lá lật cong thật + sửa hiển thị full màn (27/11/2026)
+Thiện gửi video test mới: lật trang hiệu ứng cực kém, lật bị lỗi; full
+màn thì spread lệch (trang trái cụt, bên phải đen lớn); cửa sổ thường
+thì trang phải bị cắt. Rà soát toàn bộ, map từng hiện tượng sang đúng
+cơ chế trong code:
+
+**Hiển thị / căn giữa — gốc lỗi là `transformOrigin: "top center"`**
+(Reader.tsx, style của `.spread`): spread dùng `transform: scale(...)`
+với origin ở giữa, nên visual của spread lệch khỏi khung
+`.spread-scaler` một đoạn `naturalW*(1-scale)/2` — full màn scale ≈
+1.93 thì lệch trái ~375px: trang trái cụt ở mép trái, bên phải đen
+~550px, đúng y frame f25/f42 trong video. Sửa: origin `"top left"`
+(visual khớp đúng scaler) + `.spread-scaler { margin: auto; }` thay cho
+`justify-content: center` trên viewport (bẫy tràn flexbox: scaler rộng
+hơn viewport thì phần tràn bên trái không cuộn tới được vì scrollLeft
+không âm) + reset scroll viewport khi vào/ra full màn và sau mỗi lần
+lật đáp (scroll cũ còn sót cũng làm spread lệch). Công thức fit
+(naturalW/fitScale/slot ôm tỉ lệ ảnh) đúng, đã tách ra `src/lib/layout.ts`
+(`computeSpreadLayout`, `spreadVisualRect`) để test số được.
+
+**Hiệu ứng lật — nói thẳng: lá cũ KHÔNG THỂ đẹp được.** Lá cũ là một
+tấm phẳng `rotateY` quanh gáy + dải bóng/nếp giả chỉ đổi opacity — cứng
+như bìa, không cong như giấy. v0.3.7 port đúng cơ chế curl của bản web
+mà Thiện từng khen ("đọc thấy ngon"): `src/lib/curl.ts` (nếp gấp =
+đường trung trực của đoạn điểm nắm → điểm nắm phản chiếu qua gáy, mặt
+sau phản chiếu qua nếp gấp, depth cong nhất giữa chừng) +
+`src/components/CurlLeaf.tsx` mới (5 lớp: bóng đổ mờ, dải bóng nếp gấp,
+mặt trước cắt theo vùng chưa gấp + bóng cong, mặt sau phản chiếu với
+nội dung soi gương sẵn, vệt sáng dọc nếp gấp; điểm giữ ghi thẳng vào
+DOM từng frame qua imperative handle). Kéo lật bám tay: điểm nắm là
+đúng chỗ tay bấm (kẹp trong cell), điểm giữ kẹp không lùi quá điểm nắm
+(khỏi lộn nếp), vận tốc làm mượt để flick-to-turn khi thả (quá ~1/3
+quãng hoặc flick nhanh thì lật hẳn, không thì nảy về), thời gian theo
+quãng còn lại 170–560ms thay vì lúc nào cũng 900ms; lật bằng phím/nút/
+chạm chạy cùng một lá cong theo cung quadBezier ~900ms easeOutQuart;
+nạp + giải mã spread đích TRƯỚC khi lật để mặt sau không nháy đen;
+đổi bố cục giữa chừng (1/2 trang, RTL, fit, zoom) thì hủy cú lật đang
+chạy (lá khỏi rách vì cell/gáy cũ).
+
+**Nội dung lặp ở spread 58–59 vs 60–61: KHÔNG PHẢI lỗi code.** Đã kiểm
+hết đường hiển thị trang (`spreadSides`/`spreadStartForPage`/
+`leafForFlip` đúng chỉ số, 101 test cũ vẫn pass; cache key theo chỉ số
+trang; label lấy từ `cur`) — không có đường nào trong code TS khiến
+cùng 1 ảnh hiện 2 lần. Logic ghép trang để nguyên. Thiện kiểm tra bằng
+cách mở đúng 2 trang đó trong một app đọc CBZ khác: nếu vẫn lặp thì
+file CBZ gốc lặp ảnh; nếu không lặp thì báo lại để rà tiếp phía Rust
+(`cbz_page`, không biên dịch được trên máy này).
+
+**Chưa kiểm được bằng mắt** (không có WebView trên máy build): hiệu ứng
+cong thật, cảm giác kéo/chạm, và spread căn giữa trên màn hình thật —
+test trên máy Thiện mới là cửa cuối. Test số: 101 (v030) + 13 (v034) +
+41 mới (v037: fit cửa sổ/full màn, ảnh ngang, căn giữa/không tràn,
+đổi kích thước khi vào/ra full màn, hình học curl, tweenPoint,
+kéo-thả) — tất cả pass. Rust không biên dịch được trên máy này (không
+có cargo) — GitHub Actions là cửa kiểm cuối cho Rust.
+
 ### v0.3.6 — rà soát lại toàn bộ đường lật/bôi đen + hiện số phiên bản (27/11/2026)
 Thiện báo v0.3.5 vẫn lỗi y như v0.3.4 (trang vẫn xanh lè khi kéo lật).
 Rà soát lại toàn bộ thì code v0.3.5 đúng trên lý thuyết (CBZ thì `isComic`
