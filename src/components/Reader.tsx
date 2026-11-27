@@ -3,12 +3,14 @@ import { easeOutCubic, easeOutQuart, easeOutQuint, FLIP_MS, lerpPt, clampDragPoi
 import { computeSpreadLayout, curlAnchors, curlArcControl } from "../lib/layout";
 import { CurlLeaf, type CurlLeafHandle } from "./CurlLeaf";
 import {
+  flipBaseSides,
   leafForFlip,
   nextSpreadStart,
   spreadSides,
   spreadStartForPage,
   type LeafFlip,
 } from "../lib/spread";
+import { PendingMap } from "../lib/pending";
 import { api } from "../lib/api";
 import { stripHtml } from "../lib/search";
 import {
@@ -69,6 +71,32 @@ interface CurlState {
   grab: Pt;
   mirror: Pt;
   next: number;
+  dir: 1 | -1;
+  /** Nền từng bên trong lúc lật (tính sẵn cho đúng cú lật này, dọn cùng
+   *  lúc với lá — mô hình bản web, thay cho curlTarget toàn cục). */
+  base: { left: number | null; right: number | null };
+}
+
+/** Trạng thái một cú kéo lật đang diễn ra (đã mount lá). */
+interface DragState {
+  grab: Pt;
+  from: Pt;
+  to: Pt;
+  dir: 1 | -1;
+  next: number;
+  vel: number;
+  lastT: number;
+  lastPoint: Pt;
+  grabClientX: number;
+  grabClientY: number;
+}
+
+/** Chuột/chạm vừa bấm xuống, chưa đủ 9px để thành cú kéo (bản web:
+ *  pendingDragRef) — chỉ ghi nhận, chưa mount lá, chưa khóa lật. */
+interface PendingDrag {
+  pointerId: number;
+  startX: number;
+  startY: number;
   dir: 1 | -1;
 }
 
@@ -201,8 +229,6 @@ export default function Reader({
     if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
     toastTimerRef.current = window.setTimeout(() => setToast(null), 2600);
   }, []);
-  // Trong lúc lật, nền hiển thị spread đích để lá lật xong là khớp, không giật.
-  const [curlTarget, setCurlTarget] = useState<number | null>(null);
   const [, setCacheVersion] = useState(0);
 
   // ---- v0.3.4: tỉ lệ thật của từng trang ảnh (rộng/cao) ----
@@ -289,7 +315,10 @@ export default function Reader({
   const stopTtsRef = useRef<() => void>(() => {});
 
   const cacheRef = useRef(new Map<number, ReaderPage>());
-  const inflightRef = useRef(new Set<number>());
+  // v0.3.8: dedup các lần nạp đang chờ theo trang (bản web: pendingRef) —
+  // trang đang inflight thì caller chờ đúng promise đó thay vì tiến hành
+  // với trang trống (xem PendingMap, src/lib/pending.ts).
+  const pendingRef = useRef(new PendingMap());
   const busyRef = useRef(false);
   const spreadRef = useRef<HTMLDivElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -307,18 +336,13 @@ export default function Reader({
   // Kéo chuột: điểm nắm + điểm đáp (tọa độ spread), vận tốc đã làm mượt
   // dọc trục lật (để flick-to-turn khi thả), điểm bấm lúc đầu (client
   // px) để nhận biết chạm nhẹ.
-  const dragRef = useRef<{
-    grab: Pt;
-    from: Pt;
-    to: Pt;
-    dir: 1 | -1;
-    next: number;
-    vel: number;
-    lastT: number;
-    lastPoint: Pt;
-    grabClientX: number;
-    grabClientY: number;
-  } | null>(null);
+  const dragRef = useRef<DragState | null>(null);
+  // v0.3.8: bấm xuống chưa đủ 9px thì chỉ ghi nhận (chưa mount lá —
+  // bản web: pendingDragRef); vị trí chuột mới nhất để tính điểm giữ
+  // lúc mount; cờ mount đang chờ decode (thả tay giữa chừng thì hủy).
+  const pendingDragRef = useRef<PendingDrag | null>(null);
+  const latestClientRef = useRef({ x: 0, y: 0 });
+  const dragMountingRef = useRef(false);
   const panRef = useRef<{ x: number; y: number; sl: number; st: number } | null>(null);
   const thumbCacheRef = useRef(new ThumbCache(60));
   const settingsSavedRef = useRef(false);
@@ -393,9 +417,14 @@ export default function Reader({
 
   // `cur` = trang đầu tiên theo thứ tự đọc của spread đang mở.
   const cur = Math.min(spread, Math.max(0, total - 1));
-  const shownSpread = curlTarget ?? cur;
-  // Trang ở mỗi bên (RTL: trang đọc trước nằm bên PHẢI, trang sau bên TRÁI).
-  const shownSides = spreadSides(shownSpread, twoPage, rtl, total);
+  // Trang ở mỗi bên của spread hiện tại (RTL: trang đọc trước nằm bên
+  // PHẢI, trang sau bên TRÁI).
+  const curSides = spreadSides(cur, twoPage, rtl, total);
+  // v0.3.8: nền hiển thị trong lúc lật tính sẵn cho đúng cú lật đó
+  // (curl.base — mô hình bản web) và dọn cùng lúc với lá; không lật
+  // thì nền bằng spread hiện tại. Trước đây dùng curlTarget toàn cục
+  // (spread đích) nên nền không gắn với cú lật cụ thể.
+  const shownSides = curl ? curl.base : curSides;
   const left = shownSides.left !== null ? cacheRef.current.get(shownSides.left) : undefined;
   const right = shownSides.right !== null ? cacheRef.current.get(shownSides.right) : undefined;
   const leftIndex = shownSides.left;
@@ -410,11 +439,16 @@ export default function Reader({
   // Sách chữ giữ chia đôi như cũ (chữ tự chảy đầy slot).
   // v0.3.7: toán sizing nằm ở lib/layout (computeSpreadLayout) để test
   // số được — công thức giữ nguyên v0.3.4.
-  const useAspectSlots = Boolean(left?.isImage || right?.isImage || isComic);
+  // v0.3.8: kích thước slot theo spread HIỆN TẠI (curSides), không theo
+  // nền đang lật — nền có thể hiện trang đích (tỉ lệ khác) nhưng slot
+  // không được đổi rộng giữa chừng, lá sẽ rách khỏi cell.
+  const curLeft = curSides.left !== null ? cacheRef.current.get(curSides.left) : undefined;
+  const curRight = curSides.right !== null ? cacheRef.current.get(curSides.right) : undefined;
+  const useAspectSlots = Boolean(curLeft?.isImage || curRight?.isImage || isComic);
   const leftAspect =
-    leftIndex !== null ? (aspectRef.current.get(leftIndex) ?? 0.72) : null;
+    curSides.left !== null ? (aspectRef.current.get(curSides.left) ?? 0.72) : null;
   const rightAspect =
-    rightIndex !== null ? (aspectRef.current.get(rightIndex) ?? 0.72) : null;
+    curSides.right !== null ? (aspectRef.current.get(curSides.right) ?? 0.72) : null;
   const layout = computeSpreadLayout({
     vpW: vpSize.w,
     vpH: vpSize.h,
@@ -516,26 +550,38 @@ export default function Reader({
     return () => clearTimeout(t);
   }, [zoom, fit, crop, twoPage, rtl, fontSize, lineHeight, fontSans, pageTheme, bookId]);
 
+  // v0.3.8: nạp trang, dedup bằng PendingMap (bản web: pendingRef) —
+  // trang đang inflight thì caller chờ đúng promise đó thay vì tiến
+  // hành với trang trống. Trước đây ensure bỏ qua trang inflight rồi
+  // trả về ngay, nên flip commit trong khi trang đích chưa có trong
+  // cache, nhãn đổi trước còn ảnh cũ giải mã xong sau thì hiện sai.
   const ensure = useCallback(
     async (indices: number[]): Promise<void> => {
-      const missing = indices.filter(
-        (i) => i >= 0 && i < total && !cacheRef.current.has(i) && !inflightRef.current.has(i),
-      );
-      if (missing.length === 0) return;
-      await Promise.all(
-        missing.map(async (i) => {
-          inflightRef.current.add(i);
-          try {
-            const p = await loadPage(i);
-            cacheRef.current.set(i, p);
-          } catch {
-            // Để trống, lần sau lật tới sẽ thử nạp lại.
-          } finally {
-            inflightRef.current.delete(i);
-          }
-        }),
-      );
-      setCacheVersion((v) => v + 1);
+      let started = false;
+      const jobs: Promise<void>[] = [];
+      for (const i of indices) {
+        if (i < 0 || i >= total) continue;
+        if (cacheRef.current.has(i)) continue;
+        const pending = pendingRef.current.get(i);
+        if (pending) {
+          jobs.push(pending);
+          continue;
+        }
+        started = true;
+        jobs.push(
+          pendingRef.current.start(i, async () => {
+            try {
+              const p = await loadPage(i);
+              cacheRef.current.set(i, p);
+            } catch {
+              // Để trống, lần sau lật tới sẽ thử nạp lại.
+            }
+          }),
+        );
+      }
+      if (jobs.length === 0) return;
+      await Promise.all(jobs);
+      if (started) setCacheVersion((v) => v + 1);
     },
     [loadPage, total],
   );
@@ -566,17 +612,41 @@ export default function Reader({
   }, [cur, isTextBook, highlights]);
 
   // Nhảy tới 1 trang bất kỳ (bookmark / highlight / lưới / tìm).
+  // v0.3.8: chờ nạp + giải mã xong mới đổi spread — trước đây nhảy
+  // ngay (void ensure) nên nhãn đổi trước, ảnh về sau (lệch nhãn/ảnh).
+  // decodeImages phải khai báo trước jumpTo (jumpTo dùng nó).
+  const decodeImages = useCallback(async (indices: number[], pages: (ReaderPage | undefined)[]) => {
+    await Promise.all(
+      pages.map(async (p, k) => {
+        if (!p?.isImage) return;
+        try {
+          const img = new Image();
+          img.src = p.content;
+          await img.decode();
+          noteAspect(indices[k], img.naturalWidth, img.naturalHeight);
+        } catch {
+          // Giải mã lỗi thì cứ lật tiếp, ảnh sẽ hiện khi trình duyệt nạp xong.
+        }
+      }),
+    );
+  }, [noteAspect]);
+
   const jumpTo = useCallback(
-    (page: number) => {
+    async (page: number) => {
       // Lật tay thì dừng TTS (trừ lúc TTS tự lật sang trang sau).
       if (!ttsAutoRef.current) stopTtsRef.current();
       const n = Math.max(0, Math.min(total - 1, page));
-      void ensure([n, n + 1]);
+      const pages = [n, n + 1];
+      await ensure(pages);
+      await decodeImages(
+        pages,
+        pages.map((p) => cacheRef.current.get(p)),
+      );
       setSpread(spreadStartForPage(n, twoPage, rtl, total));
       onProgress(n, total);
       setSheet(null);
     },
-    [total, twoPage, rtl, ensure, onProgress],
+    [total, twoPage, rtl, ensure, decodeImages, onProgress],
   );
 
   // App yêu cầu nhảy tới kết quả tìm PDF: nạp lại trang đó (đã có highlight
@@ -585,6 +655,9 @@ export default function Reader({
     if (!jumpRequest) return;
     const page = jumpRequest.page;
     cacheRef.current.delete(page);
+    // Buộc nạp lại trang đó (bỏ cả lần nạp đang chờ — lần nạp cũ
+    // không có highlight vàng của kết quả tìm).
+    pendingRef.current.delete(page);
     void ensure([page, page + 1]).then(() => {
       jumpTo(page);
       if (jumpRequest.query) setPendingMark({ page, query: jumpRequest.query });
@@ -607,22 +680,6 @@ export default function Reader({
     });
     return () => cancelAnimationFrame(t);
   }, [pendingMark, cur]);
-
-  const decodeImages = useCallback(async (indices: number[], pages: (ReaderPage | undefined)[]) => {
-    await Promise.all(
-      pages.map(async (p, k) => {
-        if (!p?.isImage) return;
-        try {
-          const img = new Image();
-          img.src = p.content;
-          await img.decode();
-          noteAspect(indices[k], img.naturalWidth, img.naturalHeight);
-        } catch {
-          // Giải mã lỗi thì cứ lật tiếp, ảnh sẽ hiện khi trình duyệt nạp xong.
-        }
-      }),
-    );
-  }, [noteAspect]);
 
   // ---- P2: đọc thành tiếng (TTS) ----
   const getTts = useCallback(() => {
@@ -867,7 +924,6 @@ export default function Reader({
       setSpread(next);
       onProgress(next, total);
       setCurl(null);
-      setCurlTarget(null);
       // KHÔNG reset scroll ở đây: người đang zoom to + rê trang thì lật
       // xong phải giữ nguyên vị trí rê; scroll cũ chỉ cần reset khi
       // vào/ra full màn (xem effect ở dưới).
@@ -890,16 +946,18 @@ export default function Reader({
     stopTween();
     cancelPendingPoint();
     dragRef.current = null;
+    pendingDragRef.current = null;
     setCurl(null);
-    setCurlTarget(null);
   }, [stopTween, cancelPendingPoint, setCurl]);
 
   /** Cell + điểm nắm/đáp của lá cho một cú lật (theo mô hình spread).
    *  `spineLeft` của leaf = gáy nằm ở mép trái của cell (trang phải
-   *  của spread); false = gáy ở mép phải (trang trái). */
+   *  của spread); false = gáy ở mép phải (trang trái).
+   *  v0.3.8: cell theo spread HIỆN TẠI (curSides) — nền đang lật có
+   *  thể là spread đích, cell không được đổi giữa chừng. */
   const flipGeom = useCallback(
     (leaf: LeafFlip) => {
-      const frontIsLeft = shownSides.left === leaf.front;
+      const frontIsLeft = curSides.left === leaf.front;
       const cellX = !twoPage ? 0 : frontIsLeft ? 0 : leftSlotW;
       const cellW = !twoPage
         ? leftSlotW
@@ -914,7 +972,7 @@ export default function Reader({
       );
       return { cellX, cellW, grab, mirror };
     },
-    [shownSides.left, twoPage, leftSlotW, rightSlotW, baseH],
+    [curSides.left, twoPage, leftSlotW, rightSlotW, baseH],
   );
 
   /** Lật có hiệu ứng (phím/nút/chạm/mép): lá cong quét theo cung
@@ -935,14 +993,17 @@ export default function Reader({
       const seq = ++flipSeqRef.current;
       void (async () => {
         try {
-          const dest = spreadSides(leaf.next, twoPage, rtl, total);
-          const destPages = [dest.left, dest.right].filter(
+          // Nền của đúng cú lật này (bên lật = trang đích, bên còn lại
+          // = trang hiện tại) + mặt trước/sau của lá — nạp + giải mã
+          // TẤT CẢ trước khi mount lá và trước khi commit nhãn.
+          const base = flipBaseSides(leaf, cur, twoPage, rtl, total);
+          const flipPages = [leaf.front, leaf.back, base.left, base.right].filter(
             (p): p is number => p !== null,
           );
-          await ensure(destPages);
+          await ensure(flipPages);
           await decodeImages(
-            destPages,
-            destPages.map((p) => cacheRef.current.get(p)),
+            flipPages,
+            flipPages.map((p) => cacheRef.current.get(p)),
           );
           if (flipSeqRef.current !== seq) return; // bị hủy khi đang nạp
           // Zoom vượt vừa trang thì không lật cong nữa, nhảy thẳng trang.
@@ -972,8 +1033,8 @@ export default function Reader({
             mirror: g.mirror,
             next: leaf.next,
             dir,
+            base,
           });
-          setCurlTarget(leaf.next);
           cancelTweenRef.current = tweenPoint(
             FLIP_MS,
             easeOutQuart,
@@ -991,7 +1052,6 @@ export default function Reader({
           if (flipSeqRef.current === seq) {
             busyRef.current = false;
             setCurl(null);
-            setCurlTarget(null);
           }
         }
       })();
@@ -1116,8 +1176,10 @@ export default function Reader({
   }, [pendingSelection, hlColor, hlNote, bookId, refreshHighlights]);
 
   // ---- Cắt lề: tự phát hiện lề trắng trên trang ảnh đang đọc ----
+  // v0.3.8: lấy trang của spread HIỆN TẠI (curLeft/curRight), không lấy
+  // nền đang lật (left/right) — nền có thể hiện trang đích.
   const autoDetectCrop = useCallback(async () => {
-    const page = left?.isImage ? left : right?.isImage ? right : undefined;
+    const page = curLeft?.isImage ? curLeft : curRight?.isImage ? curRight : undefined;
     if (!page) {
       setCropMsg("Trang này là chữ, không có ảnh để phát hiện lề.");
       return;
@@ -1135,7 +1197,7 @@ export default function Reader({
     } finally {
       setCropBusy(false);
     }
-  }, [left, right]);
+  }, [curLeft, curRight]);
 
   // Mở 1 sheet trượt phải (menu ⋯ / tìm / lưới / ...). Đang đọc chìm thì
   // thoát chìm trước — sheet cần không gian, không chen vào trang đọc.
@@ -1215,8 +1277,14 @@ export default function Reader({
     [scale],
   );
 
+  // v0.3.8: bấm xuống CHỈ ghi nhận (bản web: pendingDragRef) — chưa
+  // mount lá, chưa khóa lật. Lá chỉ mount sau khi tay di chuyển >9px
+  // (xem onPointerMove → beginDragFlip), sau khi trang đích đã nạp +
+  // giải mã xong. Trước đây onPointerDown mount lá ngay với chỉ 1 lần
+  // nạp trước không chờ (mặt sau có thể chưa decode), nên lật nhanh thì
+  // nhãn commit trước còn ảnh hiện sau — lệch nhãn/ảnh.
   const onPointerDown = (e: React.PointerEvent, dir: 1 | -1, slot: "left" | "right") => {
-    if (busyRef.current || !flipOn) return;
+    if (busyRef.current || dragMountingRef.current || !flipOn) return;
     if (e.pointerType === "mouse" && e.button !== 0) return;
     const el = e.currentTarget as HTMLElement;
     if (zoomedBeyondFit) {
@@ -1227,134 +1295,112 @@ export default function Reader({
       return;
     }
     // Sách chữ: kéo chuột để bôi đen chữ, không kéo lật (lật bằng nút/phím).
-    const slotPage = slot === "left" ? left : right;
+    // v0.3.8: lấy trang của spread HIỆN TẠI (curLeft/curRight), không lấy
+    // nền đang lật — nền có thể hiện trang đích.
+    const slotPage = slot === "left" ? curLeft : curRight;
     if (slotPage && !slotPage.isImage) return;
     const leaf = leafForFlip(cur, dir, twoPage, rtl, total);
     if (!leaf) return;
-    const pt = toSpreadPoint(e.clientX, e.clientY);
-    if (!pt) return;
-    // Điểm nắm = đúng chỗ tay bấm, kẹp trong cell đang lật (bản web
-    // cũng kẹp tay nắm cách gáy một đoạn ngắn để nếp gấp không bị lật
-    // ngược khi tay bấm sát gáy).
-    const frontIsLeft = shownSides.left === leaf.front;
-    const cellX = !twoPage ? 0 : frontIsLeft ? 0 : leftSlotW;
-    const cellW = !twoPage ? leftSlotW : frontIsLeft ? leftSlotW : rightSlotW;
-    const spineX = leaf.spineLeft ? cellX : cellX + cellW;
-    const grab: Pt = {
-      x: leaf.spineLeft
-        ? Math.min(Math.max(pt.x, cellX + cellW * 0.12), cellX + cellW)
-        : Math.min(Math.max(pt.x, cellX), cellX + cellW * 0.88),
-      y: Math.min(Math.max(pt.y, 2), baseH - 2),
-    };
-    // Điểm đáp = điểm nắm phản chiếu qua gáy (cùng y — kéo theo chiều
-    // ngang; điểm nắm y lệch cũng được, nếp gấp tự theo tay).
-    const to: Pt = { x: 2 * spineX - grab.x, y: grab.y };
-    busyRef.current = true;
-    // v0.3.6: xóa bôi đen cũ ngay khi bắt đầu kéo — bôi đen cũ còn sót
-    // sẽ nhuộm trang xanh (lỗi Thiện báo ở v0.3.5 vẫn còn y như v0.3.4).
-    try { window.getSelection()?.removeAllRanges(); } catch { /* bỏ qua */ }
-    setCurl({
-      front: leaf.front,
-      back: leaf.back,
-      cellX,
-      cellW,
-      grab,
-      mirror: to,
-      next: leaf.next,
+    pendingDragRef.current = {
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
       dir,
-    });
-    setCurlTarget(leaf.next);
-    // Nạp trước mặt sau + spread đích (không chờ): lá hiện ngay với
-    // mặt trước, mặt sau vẽ xong khi decode xong (CurlLeaf vẽ lại
-    // điểm giữ hiện tại sau mỗi lần render nên không bị giật về).
-    const dest = spreadSides(leaf.next, twoPage, rtl, total);
-    const warm = [leaf.front, leaf.back, dest.left, dest.right].filter(
-      (p): p is number => p !== null,
-    );
-    void ensure(warm).then(() => {
-      const back = cacheRef.current.get(leaf.back);
-      if (back) void decodeImages([leaf.back], [back]);
-    });
-    dragRef.current = {
-      grab,
-      from: grab,
-      to,
-      dir,
-      next: leaf.next,
-      vel: 0,
-      lastT: performance.now(),
-      lastPoint: grab,
-      grabClientX: e.clientX,
-      grabClientY: e.clientY,
     };
+    latestClientRef.current = { x: e.clientX, y: e.clientY };
     try { el.setPointerCapture(e.pointerId); } catch { /* bỏ qua */ }
   };
-  const onPointerMove = (e: React.PointerEvent) => {
-    const pan = panRef.current;
-    if (pan) {
-      const vp = viewportRef.current;
-      if (vp) {
-        vp.scrollLeft = pan.sl - (e.clientX - pan.x);
-        vp.scrollTop = pan.st - (e.clientY - pan.y);
+
+  /** Bắt đầu cú kéo lật sau khi tay đã di chuyển >9px: nạp + giải mã
+   *  trang đích xong mới mount lá (không commit nhãn sớm). Thả tay
+   *  giữa lúc đang chờ thì hủy mount (pending đã mất). */
+  const beginDragFlip = useCallback(async (pending: PendingDrag) => {
+    if (busyRef.current || dragMountingRef.current) return;
+    busyRef.current = true;
+    dragMountingRef.current = true;
+    const seq = flipSeqRef.current;
+    try {
+      const leaf = leafForFlip(cur, pending.dir, twoPage, rtl, total);
+      if (!leaf) return;
+      const base = flipBaseSides(leaf, cur, twoPage, rtl, total);
+      const flipPages = [leaf.front, leaf.back, base.left, base.right].filter(
+        (p): p is number => p !== null,
+      );
+      await ensure(flipPages);
+      await decodeImages(
+        flipPages,
+        flipPages.map((p) => cacheRef.current.get(p)),
+      );
+      if (flipSeqRef.current !== seq) return; // bị hủy khi đang nạp
+      if (!pendingDragRef.current || pendingDragRef.current.pointerId !== pending.pointerId) {
+        return; // thả tay rồi — không mount nữa
       }
-      return;
-    }
-    const d = dragRef.current;
-    if (!d) return;
-    const pt = toSpreadPoint(e.clientX, e.clientY);
-    if (!pt) return;
-    // Điểm giữ kẹp trên lá (không đi quá điểm đáp, không lùi quá điểm
-    // nắm) — quá điểm nắm nếp gấp sẽ lộn ngược, lá rách.
-    const point = clampDragPoint(d.grab, d.to, pt.x, pt.y, baseH);
-    // Vận tốc đã làm mượt dọc trục lật — để flick-to-turn khi thả.
-    const now = performance.now();
-    const dt = Math.max(1, now - d.lastT);
-    const axisLen = Math.hypot(d.to.x - d.from.x, d.to.y - d.from.y) || 1;
-    const v =
-      (((point.x - d.lastPoint.x) * (d.to.x - d.from.x)) / axisLen +
-        ((point.y - d.lastPoint.y) * (d.to.y - d.from.y)) / axisLen) /
-      dt;
-    d.vel = d.vel * 0.65 + v * 0.35;
-    d.lastT = now;
-    d.lastPoint = point;
-    pushPoint(point);
-  };
-  const onPointerUp = (e: React.PointerEvent) => {
-    if (panRef.current) {
-      panRef.current = null;
-      // Kéo rê khi zoom cũng có thể để lại bôi đen — xóa luôn.
+      // Điểm nắm = đúng chỗ tay bấm, kẹp trong cell đang lật (bản web
+      // cũng kẹp tay nắm cách gáy một đoạn ngắn để nếp gấp không bị lật
+      // ngược khi tay bấm sát gáy).
+      const g = flipGeom(leaf);
+      const pt0 = toSpreadPoint(pending.startX, pending.startY) ?? g.grab;
+      const cellX = g.cellX;
+      const cellW = g.cellW;
+      const spineX = leaf.spineLeft ? cellX : cellX + cellW;
+      const grab: Pt = {
+        x: leaf.spineLeft
+          ? Math.min(Math.max(pt0.x, cellX + cellW * 0.12), cellX + cellW)
+          : Math.min(Math.max(pt0.x, cellX), cellX + cellW * 0.88),
+        y: Math.min(Math.max(pt0.y, 2), baseH - 2),
+      };
+      // Điểm đáp = điểm nắm phản chiếu qua gáy (cùng y — kéo theo chiều
+      // ngang; điểm nắm y lệch cũng được, nếp gấp tự theo tay).
+      const to: Pt = { x: 2 * spineX - grab.x, y: grab.y };
+      // v0.3.6: xóa bôi đen cũ ngay khi bắt đầu kéo — bôi đen cũ còn sót
+      // sẽ nhuộm trang xanh (lỗi Thiện báo ở v0.3.5 vẫn còn y như v0.3.4).
       try { window.getSelection()?.removeAllRanges(); } catch { /* bỏ qua */ }
-      return;
+      setCurl({
+        front: leaf.front,
+        back: leaf.back,
+        cellX,
+        cellW,
+        grab,
+        mirror: to,
+        next: leaf.next,
+        dir: pending.dir,
+        base,
+      });
+      const ptNow =
+        toSpreadPoint(latestClientRef.current.x, latestClientRef.current.y) ?? grab;
+      const point = clampDragPoint(grab, to, ptNow.x, ptNow.y, baseH);
+      dragRef.current = {
+        grab,
+        from: grab,
+        to,
+        dir: pending.dir,
+        next: leaf.next,
+        vel: 0,
+        lastT: performance.now(),
+        lastPoint: point,
+        grabClientX: pending.startX,
+        grabClientY: pending.startY,
+      };
+      pushPoint(point);
+    } finally {
+      dragMountingRef.current = false;
+      // Mount bị hủy giữa chừng (thả tay / đổi bố cục) thì mở khóa;
+      // mount xong thì busyRef giữ tới khi finishFlip/spring-back dọn.
+      if (!dragRef.current) busyRef.current = false;
     }
-    const d = dragRef.current;
-    dragRef.current = null;
-    if (!d) return;
-    // v0.3.5: chạm nhẹ (không kéo) = lật trang luôn — trước đây chạm vào
-    // trang không làm gì (lá nảy về), phải kéo đủ dài hoặc bấm nút hẹp ở
-    // mép mới lật được.
-    const moved = Math.hypot(e.clientX - d.grabClientX, e.clientY - d.grabClientY);
-    if (moved < 8) {
-      setCurl(null);
-      setCurlTarget(null);
-      busyRef.current = false;
-      // Xóa mọi bôi đen còn sót (kéo lật có thể để lại, xem dưới).
-      try { window.getSelection()?.removeAllRanges(); } catch { /* bỏ qua */ }
-      startFlip(d.dir);
-      return;
-    }
-    // Thả ra: quá ~1/3 quãng — hoặc flick nhanh theo chiều lật — thì
-    // lật hẳn với đà còn lại; không thì lá nảy về chỗ cũ. Thời gian
-    // theo quãng còn lại (170–560ms), không phải lúc nào cũng 900ms.
+  }, [cur, twoPage, rtl, total, ensure, decodeImages, flipGeom, toSpreadPoint, baseH, pushPoint]);
+
+  /** Chạy nốt cú kéo đang diễn ra: commit=true thì lật hẳn, false thì
+   *  lá nảy về trang cũ. Dùng chung cho thả tay và pointer bị hủy. */
+  const settleDrag = useCallback((d: DragState, commit: boolean) => {
     cancelPendingPoint();
     const point = d.lastPoint;
     leafRef.current?.update(point); // vẽ đúng tư thế cuối đang cầm
-    const frac = dragFrac(d.from, d.to, point);
-    const commitFlip = frac > 0.35 || (d.vel > 0.55 && frac > 0.08);
-    const target = commitFlip ? d.to : d.from;
+    const target = commit ? d.to : d.from;
     const ms = dragSettleMs(d.from, d.to, point);
     const seq = flipSeqRef.current;
     void (async () => {
-      if (commitFlip) {
+      if (commit) {
         // Đảm bảo mặt sau đã decode trước khi lá chạy nốt (tránh nháy đen).
         const dest = spreadSides(d.next, twoPage, rtl, total);
         const destPages = [dest.left, dest.right].filter(
@@ -1370,23 +1416,116 @@ export default function Reader({
       if (flipSeqRef.current !== seq) return;
       cancelTweenRef.current = tweenPoint(
         ms,
-        commitFlip ? easeOutCubic : easeOutQuint,
+        commit ? easeOutCubic : easeOutQuint,
         (k) => lerpPt(point, target, k),
         applyPoint,
         () => {
           cancelTweenRef.current = null;
-          if (commitFlip) finishFlip(d.next);
+          if (commit) finishFlip(d.next);
           else {
             // Nảy về: dọn lá, mở khóa, ở nguyên trang cũ.
             busyRef.current = false;
             cancelPendingPoint();
             setCurl(null);
-            setCurlTarget(null);
             try { window.getSelection()?.removeAllRanges(); } catch { /* bỏ qua */ }
           }
         },
       );
     })();
+  }, [twoPage, rtl, total, ensure, decodeImages, applyPoint, finishFlip, cancelPendingPoint]);
+  const onPointerMove = (e: React.PointerEvent) => {
+    const pan = panRef.current;
+    if (pan) {
+      const vp = viewportRef.current;
+      if (vp) {
+        vp.scrollLeft = pan.sl - (e.clientX - pan.x);
+        vp.scrollTop = pan.st - (e.clientY - pan.y);
+      }
+      return;
+    }
+    const d = dragRef.current;
+    if (d) {
+      // Cell có key theo trang (v0.3.8) nên slot remount khi lá mount,
+      // node đã capture bị thay — khẳng định lại capture trên node
+      // hiện tại mỗi lần di chuyển để thả tay ngoài cửa sổ vẫn nhận.
+      try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch { /* bỏ qua */ }
+      const pt = toSpreadPoint(e.clientX, e.clientY);
+      if (!pt) return;
+      // Điểm giữ kẹp trên lá (không đi quá điểm đáp, không lùi quá điểm
+      // nắm) — quá điểm nắm nếp gấp sẽ lộn ngược, lá rách.
+      const point = clampDragPoint(d.grab, d.to, pt.x, pt.y, baseH);
+      // Vận tốc đã làm mượt dọc trục lật — để flick-to-turn khi thả.
+      const now = performance.now();
+      const dt = Math.max(1, now - d.lastT);
+      const axisLen = Math.hypot(d.to.x - d.from.x, d.to.y - d.from.y) || 1;
+      const v =
+        (((point.x - d.lastPoint.x) * (d.to.x - d.from.x)) / axisLen +
+          ((point.y - d.lastPoint.y) * (d.to.y - d.from.y)) / axisLen) /
+        dt;
+      d.vel = d.vel * 0.65 + v * 0.35;
+      d.lastT = now;
+      d.lastPoint = point;
+      pushPoint(point);
+      return;
+    }
+    // Chưa đủ 9px thì chỉ ghi nhận vị trí (bản web: pendingDragRef) —
+    // chưa mount lá. Vượt 9px thì bắt đầu kéo (mount lá sau khi decode).
+    const p = pendingDragRef.current;
+    if (!p || e.pointerId !== p.pointerId) return;
+    latestClientRef.current = { x: e.clientX, y: e.clientY };
+    const moved = Math.hypot(e.clientX - p.startX, e.clientY - p.startY);
+    if (moved < 9) return;
+    void beginDragFlip(p);
+  };
+  const onPointerUp = (e: React.PointerEvent) => {
+    if (panRef.current) {
+      panRef.current = null;
+      // Kéo rê khi zoom cũng có thể để lại bôi đen — xóa luôn.
+      try { window.getSelection()?.removeAllRanges(); } catch { /* bỏ qua */ }
+      return;
+    }
+    const d = dragRef.current;
+    dragRef.current = null;
+    const p = pendingDragRef.current;
+    pendingDragRef.current = null;
+    if (d) {
+      // Thả ra: quá ~1/3 quãng — hoặc flick nhanh theo chiều lật — thì
+      // lật hẳn với đà còn lại; không thì lá nảy về chỗ cũ. Thời gian
+      // theo quãng còn lại (170–560ms), không phải lúc nào cũng 900ms.
+      const frac = dragFrac(d.from, d.to, d.lastPoint);
+      const commitFlip = frac > 0.35 || (d.vel > 0.55 && frac > 0.08);
+      settleDrag(d, commitFlip);
+      return;
+    }
+    if (!p) return;
+    const moved = Math.hypot(e.clientX - p.startX, e.clientY - p.startY);
+    if (moved < 8) {
+      // v0.3.5: chạm nhẹ (không kéo) = lật trang luôn — trước đây chạm
+      // vào trang không làm gì (lá nảy về), phải kéo đủ dài hoặc bấm
+      // nút hẹp ở mép mới lật được. startFlip tự chờ decode xong mới
+      // commit nhãn nên không lệch nhãn/ảnh.
+      try { window.getSelection()?.removeAllRanges(); } catch { /* bỏ qua */ }
+      startFlip(p.dir);
+      return;
+    }
+    // Kéo quá 9px nhưng lá chưa kịp mount (đang chờ decode) — hủy
+    // mount (beginDragFlip thấy pending đã mất mà dừng), không lật.
+    // busyRef được mở lại trong finally của beginDragFlip.
+  };
+
+  // Pointer bị hủy giữa chừng (vd cửa sổ mất focus, hệ thống ngắt cử
+  // chỉ): nảy lá về trang cũ như khi thả tay chưa đủ xa — không commit,
+  // không để busyRef kẹt.
+  const onPointerCancel = () => {
+    if (panRef.current) {
+      panRef.current = null;
+      return;
+    }
+    const d = dragRef.current;
+    dragRef.current = null;
+    pendingDragRef.current = null;
+    if (!d) return;
+    settleDrag(d, false);
   };
 
   // Bôi đen chữ trong chương (chỉ sách chữ): thả chuột xong thì hiện thanh lưu gạch chân.
@@ -1414,15 +1553,21 @@ export default function Reader({
     [thumbApi],
   );
 
+  // v0.3.8: mỗi mặt có key theo chỉ số trang — React mount node DOM
+  // mới cho mỗi trang thay vì tái dùng node cũ rồi chỉ đổi src (data
+  // URL base64 vài MB giải mã bất đồng bộ, lật nhanh thì các lần giải
+  // mã hoàn thành không theo thứ tự → ảnh hiện sai spread). Trang chưa
+  // nạp xong hiện "Đang tải trang…" thay vì ảnh sai.
   const renderFace = (p: ReaderPage | undefined, mirrored: boolean, pageIndex: number) => {
     if (!p) {
-      return <div className="page-face page-loading">Đang tải trang…</div>;
+      return <div key={pageIndex} className="page-face page-loading">Đang tải trang…</div>;
     }
     const cropActive = p.isImage && hasCrop(crop);
     return (
-      <div className="page-face" style={mirrored ? { transform: "scaleX(-1)" } : undefined}>
+      <div key={pageIndex} className="page-face" style={mirrored ? { transform: "scaleX(-1)" } : undefined}>
         {p.isImage ? (
           <img
+            key={pageIndex}
             className="page-img"
             src={p.content}
             alt={p.label}
@@ -1452,16 +1597,23 @@ export default function Reader({
   // Thanh trượt dưới (v0.3.4): kéo chỉ đổi vị trí hiển thị, thả ra mới
   // nhảy trang. Trước đây mỗi tick kéo đều nạp trang + ghi lịch sử SQLite
   // + nạp lại toàn bộ lịch sử nên kéo trượt giật, cứng.
-  const commitSlider = useCallback(() => {
+  // v0.3.8: thả ra thì chờ nạp + giải mã xong mới đổi spread — như
+  // jumpTo, nhãn không đổi trước ảnh.
+  const commitSlider = useCallback(async () => {
     if (sliderVal === null) return;
     const n = sliderVal;
     setSliderVal(null);
     if (n === cur) return;
     stopTtsRef.current();
-    void ensure([n, n + 1]);
+    const pages = [n, n + 1];
+    await ensure(pages);
+    await decodeImages(
+      pages,
+      pages.map((p) => cacheRef.current.get(p)),
+    );
     setSpread(spreadStartForPage(n, twoPage, rtl, total));
     onProgress(n, total);
-  }, [sliderVal, cur, twoPage, rtl, total, ensure, onProgress]);
+  }, [sliderVal, cur, twoPage, rtl, total, ensure, decodeImages, onProgress]);
 
   return (
     <div
@@ -1642,38 +1794,46 @@ export default function Reader({
               } as React.CSSProperties}
               onMouseUp={onSpreadMouseUp}
             >
-              {/* Trang nền bên trái (null = bên trống, vd bìa manga RTL). */}
+              {/* Trang nền bên trái (null = bên trống, vd bìa manga RTL).
+                  v0.3.8: slot có key theo chỉ số trang — đổi trang thì
+                  mount node mới, không tái dùng node cũ (xem renderFace). */}
               {leftIndex === null ? (
                 <div
+                  key="empty-left"
                   className="page-slot left empty"
                   style={useAspectSlots ? { flex: "none", width: leftSlotW } : undefined}
                 />
               ) : (
                 <div
+                  key={leftIndex}
                   className={`page-slot ${twoPage ? "left" : "single"}${left?.isImage ? " img" : ""}${bookmarks.some((b) => b.page === leftIndex) ? " bookmarked" : ""}`}
                   style={useAspectSlots ? { flex: "none", width: leftSlotW } : undefined}
                   onPointerDown={(e) => onPointerDown(e, rtl ? 1 : -1, "left")}
                   onPointerMove={onPointerMove}
                   onPointerUp={onPointerUp}
+                  onPointerCancel={onPointerCancel}
                 >
-                  {renderFace(left, false, leftIndex ?? shownSpread)}
+                  {renderFace(left, false, leftIndex)}
                 </div>
               )}
               {twoPage &&
                 (rightIndex === null ? (
                   <div
+                    key="empty-right"
                     className="page-slot right empty"
                     style={useAspectSlots ? { flex: "none", width: rightSlotW } : undefined}
                   />
                 ) : (
                   <div
+                    key={rightIndex}
                     className={`page-slot right${right?.isImage ? " img" : ""}${bookmarks.some((b) => b.page === rightIndex) ? " bookmarked" : ""}`}
                     style={useAspectSlots ? { flex: "none", width: rightSlotW } : undefined}
                     onPointerDown={(e) => onPointerDown(e, rtl ? -1 : 1, "right")}
                     onPointerMove={onPointerMove}
                     onPointerUp={onPointerUp}
+                    onPointerCancel={onPointerCancel}
                   >
-                    {renderFace(right, false, rightIndex ?? shownSpread + 1)}
+                    {renderFace(right, false, rightIndex)}
                   </div>
                 ))}
               {/* Lá lật cong thật (v0.3.7, port từ bản web): chỉ mount
