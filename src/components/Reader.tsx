@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { easeOutQuart, FLIP_MS, foldGeometry } from "../lib/curl";
+import { easeOutCubic, easeOutQuart, easeOutQuint, FLIP_MS, lerpPt, clampDragPoint, dragFrac, dragSettleMs, tweenPoint, quadBezier, type Pt } from "../lib/curl";
+import { computeSpreadLayout, curlAnchors, curlArcControl } from "../lib/layout";
+import { CurlLeaf, type CurlLeafHandle } from "./CurlLeaf";
 import {
   leafForFlip,
   nextSpreadStart,
   spreadSides,
   spreadStartForPage,
+  type LeafFlip,
 } from "../lib/spread";
 import { api } from "../lib/api";
 import { stripHtml } from "../lib/search";
@@ -53,6 +56,20 @@ export interface ReaderPage {
   content: string;
   isImage: boolean;
   label: string;
+}
+
+/** Trạng thái một cú lật cong đang diễn ra (đủ để mount CurlLeaf).
+ *  Mặt trước = trang đang đọc, mặt sau = trang đích. Cell + điểm nắm
+ *  theo tọa độ spread (layout px, chưa scale). */
+interface CurlState {
+  front: number;
+  back: number;
+  cellX: number;
+  cellW: number;
+  grab: Pt;
+  mirror: Pt;
+  next: number;
+  dir: 1 | -1;
 }
 
 /** Khả năng tìm trong sách: null = sách ảnh, không tìm được chữ trong tranh. */
@@ -274,27 +291,35 @@ export default function Reader({
   const cacheRef = useRef(new Map<number, ReaderPage>());
   const inflightRef = useRef(new Set<number>());
   const busyRef = useRef(false);
-  const leafRef = useRef<HTMLDivElement>(null);
-  const shadowRef = useRef<HTMLDivElement>(null);
-  const creaseRef = useRef<HTMLDivElement>(null);
   const spreadRef = useRef<HTMLDivElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
+  // ---- v0.3.7: lá lật cong thật (port từ bản web) ----
+  // `curl` (state) mount lá + mặt trước/sau; `curlRef` là bản sao cho
+  // các driver (kéo/tween) đọc không cần re-render; `leafRef` là tay
+  // cầm imperative của CurlLeaf (viết style thẳng vào DOM từng frame).
+  const [curl, setCurlState] = useState<CurlState | null>(null);
+  const curlRef = useRef<CurlState | null>(null);
+  const leafRef = useRef<CurlLeafHandle | null>(null);
+  const cancelTweenRef = useRef<(() => void) | null>(null);
+  const flipSeqRef = useRef(0);
+  const pointRafRef = useRef(0);
+  const pendingPointRef = useRef<Pt | null>(null);
+  // Kéo chuột: điểm nắm + điểm đáp (tọa độ spread), vận tốc đã làm mượt
+  // dọc trục lật (để flick-to-turn khi thả), điểm bấm lúc đầu (client
+  // px) để nhận biết chạm nhẹ.
   const dragRef = useRef<{
-    grabX: number;
-    grabY: number;
+    grab: Pt;
+    from: Pt;
+    to: Pt;
     dir: 1 | -1;
-    spineLeft: boolean;
     next: number;
-    rect: DOMRect;
+    vel: number;
+    lastT: number;
+    lastPoint: Pt;
+    grabClientX: number;
+    grabClientY: number;
   } | null>(null);
   const panRef = useRef<{ x: number; y: number; sl: number; st: number } | null>(null);
-  const curlRef = useRef<{
-    dir: 1 | -1;
-    spineLeft: boolean;
-    next: number;
-    front: number;
-    back: number;
-  } | null>(null);
   const thumbCacheRef = useRef(new ThumbCache(60));
   const settingsSavedRef = useRef(false);
 
@@ -379,35 +404,29 @@ export default function Reader({
   const nextSpread = nextSpreadStart(cur, 1, twoPage, rtl, total);
 
   // ---- Đo kích thước để tính zoom/fit ----
-  const baseW = twoPage
-    ? Math.min(1200, Math.max(320, vpSize.w - 24))
-    : Math.min(600, Math.max(320, vpSize.w - 24));
   // Trang ảnh thì mỗi slot ôm đúng tỉ lệ ảnh (v0.3.4, xem noteAspect):
   // rộng = tỉ lệ * chiều cao spread; chưa biết tỉ lệ thì tạm 0.72 (tỉ lệ
   // truyện tranh thường gặp), ảnh nạp xong sẽ chỉnh lại đúng tỉ lệ thật.
   // Sách chữ giữ chia đôi như cũ (chữ tự chảy đầy slot).
+  // v0.3.7: toán sizing nằm ở lib/layout (computeSpreadLayout) để test
+  // số được — công thức giữ nguyên v0.3.4.
   const useAspectSlots = Boolean(left?.isImage || right?.isImage || isComic);
-  const aspectSlotW = (idx: number | null): number | null => {
-    if (idx === null) return null;
-    const a = aspectRef.current.get(idx) ?? 0.72;
-    return Math.max(120, a * baseH);
-  };
-  const fallbackSlotW = Math.max(120, 0.72 * baseH);
-  const leftSlotW = useAspectSlots
-    ? (aspectSlotW(leftIndex) ?? aspectSlotW(rightIndex) ?? fallbackSlotW)
-    : 0;
-  const rightSlotW = useAspectSlots && twoPage
-    ? (aspectSlotW(rightIndex) ?? aspectSlotW(leftIndex) ?? fallbackSlotW)
-    : 0;
-  // Bên trống (vd bìa manga RTL chỉ có 1 trang bên phải) thì rộng bằng bên
-  // kia để trang không bị lệch khỏi phía của nó.
-  const naturalW = useAspectSlots ? (twoPage ? leftSlotW + rightSlotW : leftSlotW) : baseW;
-  // Chương sách chữ dài hơn viewport thì fit theo chiều rộng là chính,
-  // không thu nhỏ chữ tới mức không đọc được.
-  const effH = Math.min(baseH, vpSize.h);
-  const fitScale =
-    fit === "width" ? vpSize.w / naturalW : fit === "height" ? vpSize.h / effH : Math.min(vpSize.w / naturalW, vpSize.h / effH);
-  const scale = fitScale * zoom;
+  const leftAspect =
+    leftIndex !== null ? (aspectRef.current.get(leftIndex) ?? 0.72) : null;
+  const rightAspect =
+    rightIndex !== null ? (aspectRef.current.get(rightIndex) ?? 0.72) : null;
+  const layout = computeSpreadLayout({
+    vpW: vpSize.w,
+    vpH: vpSize.h,
+    baseH,
+    leftAspect,
+    rightAspect,
+    twoPage,
+    useAspectSlots,
+    fit,
+    zoom,
+  });
+  const { naturalW, fitScale, scale, leftSlotW, rightSlotW } = layout;
   const zoomedBeyondFit = zoom > 1.02;
 
   useEffect(() => {
@@ -780,52 +799,131 @@ export default function Reader({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ttsMsg]);
 
-  /** Ghi tư thế lá lật thẳng vào DOM (không render lại React).
-   * `spineLeft` = gáy lá nằm bên trái: lá xoay quanh mép trái, góc âm.
-   * Ngược lại xoay quanh mép phải, góc dương. */
-  const applyPose = useCallback((progress: number, spineLeft: boolean, tiltDeg: number) => {
-    const leaf = leafRef.current;
-    const shadow = shadowRef.current;
-    const crease = creaseRef.current;
-    const shade = Math.sin(progress * Math.PI);
-    if (leaf) {
-      const sign = spineLeft ? -1 : 1;
-      leaf.style.opacity = progress <= 0 ? "0" : "1";
-      leaf.style.transform = `rotateY(${sign * progress * 180}deg) rotateX(${tiltDeg}deg)`;
-      leaf.style.transformOrigin = spineLeft ? "left center" : "right center";
+  // ================================================================
+  // v0.3.7 — LÁ LẬT CONG THẬT (port từ bản web phan-mem-doc-sach).
+  //
+  // Lá cũ là một tấm phẳng rotateY quanh gáy + một dải bóng/nếp giả
+  // chỉ đổi opacity — nhìn cứng, không cong như giấy thật, và người
+  // dùng kêu "hiệu ứng cực kém, lật bị lỗi". Lá mới (CurlLeaf) dùng
+  // đúng fold geometry của bản web: nếp gấp = đường trung trực của
+  // đoạn (điểm nắm → điểm nắm phản chiếu qua gáy), mặt sau phản chiếu
+  // qua nếp gấp, bóng đổ + nếp gấp + vệt sáng bám đúng theo góc lật.
+  // Lá chỉ mount khi đang lật; điểm giữ được ghi thẳng vào DOM của lá
+  // (imperative handle), không render lại React giữa lúc lật.
+  // ================================================================
+
+  /** Đưa viewport về đầu (v0.3.7): scroll cũ còn sót sau khi vào/ra
+   *  full màn sẽ làm spread lệch hẳn sang một bên với khoảng đen lớn
+   *  bên kia — video 27/11. */
+  const resetViewportScroll = useCallback(() => {
+    const vp = viewportRef.current;
+    if (vp) {
+      vp.scrollLeft = 0;
+      vp.scrollTop = 0;
     }
-    if (shadow) shadow.style.opacity = String(shade * 0.5);
-    if (crease) crease.style.opacity = String(shade * 0.85);
   }, []);
 
-  const resetPose = useCallback(() => {
-    const leaf = leafRef.current;
-    if (leaf) {
-      leaf.style.transform = "";
-      leaf.style.opacity = "0";
-    }
-    if (shadowRef.current) shadowRef.current.style.opacity = "0";
-    if (creaseRef.current) creaseRef.current.style.opacity = "0";
+  /** Mount/gỡ lá lật: `curl` (state) cho React render, `curlRef` cho
+   *  các driver (kéo/tween) đọc không cần re-render. */
+  const setCurl = useCallback((c: CurlState | null) => {
+    curlRef.current = c;
+    setCurlState(c);
   }, []);
 
-  /** Chạy animation lật từ tiến độ `from` tới `to` (0 = chưa lật, 1 = lật xong). */
-  const animateCurl = useCallback(
-    (spineLeft: boolean, from: number, to: number, done: () => void) => {
-      const start = performance.now();
-      const tick = (now: number) => {
-        const t = Math.min(1, (now - start) / FLIP_MS);
-        const progress = from + (to - from) * easeOutQuart(t);
-        applyPose(progress, spineLeft, 0);
-        if (t < 1) requestAnimationFrame(tick);
-        else done();
-      };
-      requestAnimationFrame(tick);
+  const stopTween = useCallback(() => {
+    cancelTweenRef.current?.();
+    cancelTweenRef.current = null;
+  }, []);
+
+  /** Vẽ điểm giữ lên lá ngay: ghi sổ + viết thẳng vào DOM của lá. */
+  const applyPoint = useCallback((p: Pt) => {
+    leafRef.current?.update(p);
+  }, []);
+
+  /** Gom các điểm kéo về 1 lần vẽ mỗi khung hình (khỏi vẽ dồn). */
+  const pushPoint = useCallback((p: Pt) => {
+    pendingPointRef.current = p;
+    if (!pointRafRef.current) {
+      pointRafRef.current = requestAnimationFrame(() => {
+        pointRafRef.current = 0;
+        const pt = pendingPointRef.current;
+        pendingPointRef.current = null;
+        if (pt) leafRef.current?.update(pt);
+      });
+    }
+  }, []);
+
+  const cancelPendingPoint = useCallback(() => {
+    if (pointRafRef.current) cancelAnimationFrame(pointRafRef.current);
+    pointRafRef.current = 0;
+    pendingPointRef.current = null;
+  }, []);
+
+  /** Kết thúc một cú lật: đáp đúng spread đích, dọn lá + khóa lật. */
+  const finishFlip = useCallback(
+    (next: number) => {
+      busyRef.current = false;
+      cancelPendingPoint();
+      setSpread(next);
+      onProgress(next, total);
+      setCurl(null);
+      setCurlTarget(null);
+      // KHÔNG reset scroll ở đây: người đang zoom to + rê trang thì lật
+      // xong phải giữ nguyên vị trí rê; scroll cũ chỉ cần reset khi
+      // vào/ra full màn (xem effect ở dưới).
+      // v0.3.5: kéo lật có thể để trình duyệt bôi đen trang ảnh (trang
+      // bị nhuộm xanh, video Thiện gửi) — xóa bôi đen sau mỗi lần lật.
+      try {
+        window.getSelection()?.removeAllRanges();
+      } catch {
+        /* bỏ qua */
+      }
     },
-    [applyPose],
+    [cancelPendingPoint, onProgress],
   );
 
-  const commit = useCallback(
-    async (dir: 1 | -1, fromProgress = 0) => {
+  /** Hủy cú lật đang chạy: đổi bố cục giữa chừng thì lá rách vì cell/
+   *  gáy đã cũ (bản web cũng hủy lật khi đổi fit/dual/direction). */
+  const cancelFlip = useCallback(() => {
+    flipSeqRef.current++;
+    busyRef.current = false;
+    stopTween();
+    cancelPendingPoint();
+    dragRef.current = null;
+    setCurl(null);
+    setCurlTarget(null);
+  }, [stopTween, cancelPendingPoint, setCurl]);
+
+  /** Cell + điểm nắm/đáp của lá cho một cú lật (theo mô hình spread).
+   *  `spineLeft` của leaf = gáy nằm ở mép trái của cell (trang phải
+   *  của spread); false = gáy ở mép phải (trang trái). */
+  const flipGeom = useCallback(
+    (leaf: LeafFlip) => {
+      const frontIsLeft = shownSides.left === leaf.front;
+      const cellX = !twoPage ? 0 : frontIsLeft ? 0 : leftSlotW;
+      const cellW = !twoPage
+        ? leftSlotW
+        : frontIsLeft
+          ? leftSlotW
+          : rightSlotW;
+      const { grab, mirror } = curlAnchors(
+        cellX,
+        cellW,
+        leaf.spineLeft,
+        baseH,
+      );
+      return { cellX, cellW, grab, mirror };
+    },
+    [shownSides.left, twoPage, leftSlotW, rightSlotW, baseH],
+  );
+
+  /** Lật có hiệu ứng (phím/nút/chạm/mép): lá cong quét theo cung
+   *  ~900ms, easeOutQuart — thay thế commit() cũ (tấm phẳng rotateY).
+   *  Nạp + giải mã spread đích TRƯỚC khi lật để mặt sau không nháy
+   *  đen lúc mới hiện (bản web cũng chờ decode xong mới cho lá chạy).
+   *  Không chờ tween: khóa busyRef giữ tới khi finishFlip dọn. */
+  const startFlip = useCallback(
+    (dir: 1 | -1) => {
       if (busyRef.current) return;
       // Lá nào lật, hiện trang nào — tính 1 lần từ mô hình spread
       // (đúng cho cả 1/2 trang × LTR/RTL; xem src/lib/spread.ts).
@@ -834,41 +932,98 @@ export default function Reader({
       // Lật tay thì dừng TTS (trừ lúc TTS tự lật sang trang sau).
       if (!ttsAutoRef.current) stopTtsRef.current();
       busyRef.current = true;
-      try {
-        // Nạp + giải mã spread đích trước khi lật để không giật giữa chừng.
-        const dest = spreadSides(leaf.next, twoPage, rtl, total);
-        const destPages = [dest.left, dest.right].filter(
-          (p): p is number => p !== null,
-        );
-        await ensure(destPages);
-        await decodeImages(destPages, destPages.map((p) => cacheRef.current.get(p)));
-        // Zoom vượt vừa trang thì không lật cong nữa, nhảy thẳng trang.
-        if (!flipOn || fromProgress >= 1 || zoomedBeyondFit) {
-          setSpread(leaf.next);
-          onProgress(leaf.next, total);
-          return;
+      const seq = ++flipSeqRef.current;
+      void (async () => {
+        try {
+          const dest = spreadSides(leaf.next, twoPage, rtl, total);
+          const destPages = [dest.left, dest.right].filter(
+            (p): p is number => p !== null,
+          );
+          await ensure(destPages);
+          await decodeImages(
+            destPages,
+            destPages.map((p) => cacheRef.current.get(p)),
+          );
+          if (flipSeqRef.current !== seq) return; // bị hủy khi đang nạp
+          // Zoom vượt vừa trang thì không lật cong nữa, nhảy thẳng trang.
+          if (
+            !flipOn ||
+            zoomedBeyondFit ||
+            window.matchMedia("(prefers-reduced-motion: reduce)").matches
+          ) {
+            finishFlip(leaf.next);
+            return;
+          }
+          const g = flipGeom(leaf);
+          const p0 = g.grab;
+          const p1 = g.mirror;
+          const ctrl = curlArcControl(p0, p1, baseH);
+          const path = (k: number) => quadBezier(p0, ctrl, p1, k);
+          // Mount lá hơi chếch vào trong cú lật để 2 mặt đều là trang
+          // thật đã vẽ xong, rồi để 2 khung hình trôi qua mới cho lá
+          // chạy (tweenPoint preFrames): mount và chuyển động giành
+          // nhau cùng khung hình sẽ làm lật giật ngay lúc bắt đầu.
+          setCurl({
+            front: leaf.front,
+            back: leaf.back,
+            cellX: g.cellX,
+            cellW: g.cellW,
+            grab: g.grab,
+            mirror: g.mirror,
+            next: leaf.next,
+            dir,
+          });
+          setCurlTarget(leaf.next);
+          cancelTweenRef.current = tweenPoint(
+            FLIP_MS,
+            easeOutQuart,
+            path,
+            applyPoint,
+            () => {
+              cancelTweenRef.current = null;
+              finishFlip(leaf.next);
+            },
+            2,
+            0.03,
+          );
+        } catch {
+          // Nạp lỗi thì vẫn dọn khóa (tránh kẹt không lật được nữa).
+          if (flipSeqRef.current === seq) {
+            busyRef.current = false;
+            setCurl(null);
+            setCurlTarget(null);
+          }
         }
-        curlRef.current = { dir, spineLeft: leaf.spineLeft, next: leaf.next, front: leaf.front, back: leaf.back };
-        setCurlTarget(leaf.next);
-        // Đợi 1 khung hình để nền spread đích vẽ xong rồi mới lật.
-        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
-        await new Promise<void>((resolve) => {
-          animateCurl(leaf.spineLeft, fromProgress, 1, resolve);
-        });
-        setSpread(leaf.next);
-        onProgress(leaf.next, total);
-      } finally {
-        curlRef.current = null;
-        setCurlTarget(null);
-        resetPose();
-        busyRef.current = false;
-        // v0.3.5: kéo lật có thể để trình duyệt bôi đen trang ảnh (trang
-        // bị nhuộm xanh, video Thiện gửi) — xóa bôi đen sau mỗi lần lật.
-        try { window.getSelection()?.removeAllRanges(); } catch { /* bỏ qua */ }
-      }
+      })();
     },
-    [cur, twoPage, rtl, total, flipOn, zoomedBeyondFit, ensure, decodeImages, animateCurl, onProgress, resetPose],
+    [
+      cur,
+      twoPage,
+      rtl,
+      total,
+      flipOn,
+      zoomedBeyondFit,
+      ensure,
+      decodeImages,
+      flipGeom,
+      baseH,
+      applyPoint,
+      finishFlip,
+    ],
   );
+
+  // v0.3.7: vào/ra full màn thì đưa viewport về đầu (scroll cũ còn sót
+  // sẽ làm spread lệch hẳn sang một bên — video 27/11). Đổi bố cục
+  // (1/2 trang, RTL, fit, zoom) giữa chừng thì hủy cú lật đang chạy
+  // (lá sẽ rách vì cell/gáy đã cũ).
+  useEffect(() => {
+    resetViewportScroll();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [immersive]);
+  useEffect(() => {
+    cancelFlip();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [twoPage, rtl, fit, zoom]);
 
   // ---- Bookmarks ----
   const toggleBookmark = useCallback(async () => {
@@ -1003,8 +1158,8 @@ export default function Reader({
         openSheet("search");
         return;
       }
-      if (e.key === "ArrowRight") void commit(rtl ? -1 : 1);
-      else if (e.key === "ArrowLeft") void commit(rtl ? 1 : -1);
+      if (e.key === "ArrowRight") startFlip(rtl ? -1 : 1);
+      else if (e.key === "ArrowLeft") startFlip(rtl ? 1 : -1);
       else if (e.key === "f" || e.key === "F") {
         if (immersive) void exitImmersive();
         else void enterImmersive();
@@ -1027,7 +1182,7 @@ export default function Reader({
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [commit, rtl, sheet, immersive, pendingSelection, toggleBookmark, openSheet]);
+  }, [startFlip, rtl, sheet, immersive, pendingSelection, toggleBookmark, openSheet]);
 
   const toggleImmersive = () => {
     if (immersive) void exitImmersive();
@@ -1047,15 +1202,28 @@ export default function Reader({
   };
 
   // ---- Kéo chuột: zoom vượt vừa trang thì rê trang, không thì lật ----
+  /** Chuột (client px) → tọa độ spread (layout px, chưa scale) — để
+   *  điểm nắm của lá là đúng chỗ tay bấm. Dùng rect visual của spread
+   *  (đã scale) chia cho scale. */
+  const toSpreadPoint = useCallback(
+    (clientX: number, clientY: number): Pt | null => {
+      const el = spreadRef.current;
+      if (!el || scale === 0) return null;
+      const r = el.getBoundingClientRect();
+      return { x: (clientX - r.left) / scale, y: (clientY - r.top) / scale };
+    },
+    [scale],
+  );
+
   const onPointerDown = (e: React.PointerEvent, dir: 1 | -1, slot: "left" | "right") => {
     if (busyRef.current || !flipOn) return;
+    if (e.pointerType === "mouse" && e.button !== 0) return;
     const el = e.currentTarget as HTMLElement;
-    const rect = el.getBoundingClientRect();
     if (zoomedBeyondFit) {
       const vp = viewportRef.current;
       if (!vp) return;
       panRef.current = { x: e.clientX, y: e.clientY, sl: vp.scrollLeft, st: vp.scrollTop };
-      el.setPointerCapture(e.pointerId);
+      try { el.setPointerCapture(e.pointerId); } catch { /* bỏ qua */ }
       return;
     }
     // Sách chữ: kéo chuột để bôi đen chữ, không kéo lật (lật bằng nút/phím).
@@ -1063,18 +1231,63 @@ export default function Reader({
     if (slotPage && !slotPage.isImage) return;
     const leaf = leafForFlip(cur, dir, twoPage, rtl, total);
     if (!leaf) return;
-    dragRef.current = { grabX: e.clientX, grabY: e.clientY, dir, spineLeft: leaf.spineLeft, next: leaf.next, rect };
+    const pt = toSpreadPoint(e.clientX, e.clientY);
+    if (!pt) return;
+    // Điểm nắm = đúng chỗ tay bấm, kẹp trong cell đang lật (bản web
+    // cũng kẹp tay nắm cách gáy một đoạn ngắn để nếp gấp không bị lật
+    // ngược khi tay bấm sát gáy).
+    const frontIsLeft = shownSides.left === leaf.front;
+    const cellX = !twoPage ? 0 : frontIsLeft ? 0 : leftSlotW;
+    const cellW = !twoPage ? leftSlotW : frontIsLeft ? leftSlotW : rightSlotW;
+    const spineX = leaf.spineLeft ? cellX : cellX + cellW;
+    const grab: Pt = {
+      x: leaf.spineLeft
+        ? Math.min(Math.max(pt.x, cellX + cellW * 0.12), cellX + cellW)
+        : Math.min(Math.max(pt.x, cellX), cellX + cellW * 0.88),
+      y: Math.min(Math.max(pt.y, 2), baseH - 2),
+    };
+    // Điểm đáp = điểm nắm phản chiếu qua gáy (cùng y — kéo theo chiều
+    // ngang; điểm nắm y lệch cũng được, nếp gấp tự theo tay).
+    const to: Pt = { x: 2 * spineX - grab.x, y: grab.y };
     busyRef.current = true;
     // v0.3.6: xóa bôi đen cũ ngay khi bắt đầu kéo — bôi đen cũ còn sót
     // sẽ nhuộm trang xanh (lỗi Thiện báo ở v0.3.5 vẫn còn y như v0.3.4).
     try { window.getSelection()?.removeAllRanges(); } catch { /* bỏ qua */ }
-    curlRef.current = { dir, spineLeft: leaf.spineLeft, next: leaf.next, front: leaf.front, back: leaf.back };
+    setCurl({
+      front: leaf.front,
+      back: leaf.back,
+      cellX,
+      cellW,
+      grab,
+      mirror: to,
+      next: leaf.next,
+      dir,
+    });
     setCurlTarget(leaf.next);
+    // Nạp trước mặt sau + spread đích (không chờ): lá hiện ngay với
+    // mặt trước, mặt sau vẽ xong khi decode xong (CurlLeaf vẽ lại
+    // điểm giữ hiện tại sau mỗi lần render nên không bị giật về).
     const dest = spreadSides(leaf.next, twoPage, rtl, total);
-    void ensure(
-      [dest.left, dest.right].filter((p): p is number => p !== null),
+    const warm = [leaf.front, leaf.back, dest.left, dest.right].filter(
+      (p): p is number => p !== null,
     );
-    el.setPointerCapture(e.pointerId);
+    void ensure(warm).then(() => {
+      const back = cacheRef.current.get(leaf.back);
+      if (back) void decodeImages([leaf.back], [back]);
+    });
+    dragRef.current = {
+      grab,
+      from: grab,
+      to,
+      dir,
+      next: leaf.next,
+      vel: 0,
+      lastT: performance.now(),
+      lastPoint: grab,
+      grabClientX: e.clientX,
+      grabClientY: e.clientY,
+    };
+    try { el.setPointerCapture(e.pointerId); } catch { /* bỏ qua */ }
   };
   const onPointerMove = (e: React.PointerEvent) => {
     const pan = panRef.current;
@@ -1088,13 +1301,23 @@ export default function Reader({
     }
     const d = dragRef.current;
     if (!d) return;
-    const g = foldGeometry(
-      { x: d.grabX, y: d.grabY },
-      { x: e.clientX, y: e.clientY },
-      d.rect.width,
-    );
-    const tilt = Math.max(-12, Math.min(12, g.creaseAngle * 17));
-    applyPose(g.progress, d.spineLeft, tilt);
+    const pt = toSpreadPoint(e.clientX, e.clientY);
+    if (!pt) return;
+    // Điểm giữ kẹp trên lá (không đi quá điểm đáp, không lùi quá điểm
+    // nắm) — quá điểm nắm nếp gấp sẽ lộn ngược, lá rách.
+    const point = clampDragPoint(d.grab, d.to, pt.x, pt.y, baseH);
+    // Vận tốc đã làm mượt dọc trục lật — để flick-to-turn khi thả.
+    const now = performance.now();
+    const dt = Math.max(1, now - d.lastT);
+    const axisLen = Math.hypot(d.to.x - d.from.x, d.to.y - d.from.y) || 1;
+    const v =
+      (((point.x - d.lastPoint.x) * (d.to.x - d.from.x)) / axisLen +
+        ((point.y - d.lastPoint.y) * (d.to.y - d.from.y)) / axisLen) /
+      dt;
+    d.vel = d.vel * 0.65 + v * 0.35;
+    d.lastT = now;
+    d.lastPoint = point;
+    pushPoint(point);
   };
   const onPointerUp = (e: React.PointerEvent) => {
     if (panRef.current) {
@@ -1109,54 +1332,61 @@ export default function Reader({
     // v0.3.5: chạm nhẹ (không kéo) = lật trang luôn — trước đây chạm vào
     // trang không làm gì (lá nảy về), phải kéo đủ dài hoặc bấm nút hẹp ở
     // mép mới lật được.
-    const moved = Math.hypot(e.clientX - d.grabX, e.clientY - d.grabY);
+    const moved = Math.hypot(e.clientX - d.grabClientX, e.clientY - d.grabClientY);
     if (moved < 8) {
-      curlRef.current = null;
+      setCurl(null);
       setCurlTarget(null);
-      resetPose();
       busyRef.current = false;
       // Xóa mọi bôi đen còn sót (kéo lật có thể để lại, xem dưới).
       try { window.getSelection()?.removeAllRanges(); } catch { /* bỏ qua */ }
-      void commit(d.dir);
+      startFlip(d.dir);
       return;
     }
-    const g = foldGeometry(
-      { x: d.grabX, y: d.grabY },
-      { x: e.clientX, y: e.clientY },
-      d.rect.width,
-    );
-    if (g.progress > 0.33) {
-      // Lật hẳn từ đúng tư thế đang kéo.
-      void (async () => {
-        try {
-          const dest = spreadSides(d.next, twoPage, rtl, total);
-          await ensure(
-            [dest.left, dest.right].filter((p): p is number => p !== null),
-          );
-          await new Promise<void>((resolve) => {
-            animateCurl(d.spineLeft, g.progress, 1, resolve);
-          });
-          const next = d.next;
-          setSpread(next);
-          onProgress(next, total);
-        } finally {
-          curlRef.current = null;
-          setCurlTarget(null);
-          resetPose();
-          busyRef.current = false;
-          try { window.getSelection()?.removeAllRanges(); } catch { /* bỏ qua */ }
-        }
-      })();
-    } else {
-      // Chưa đủ đà: lá nảy về chỗ cũ.
-      animateCurl(d.spineLeft, g.progress, 0, () => {
-        curlRef.current = null;
-        setCurlTarget(null);
-        resetPose();
-        busyRef.current = false;
-        try { window.getSelection()?.removeAllRanges(); } catch { /* bỏ qua */ }
-      });
-    }
+    // Thả ra: quá ~1/3 quãng — hoặc flick nhanh theo chiều lật — thì
+    // lật hẳn với đà còn lại; không thì lá nảy về chỗ cũ. Thời gian
+    // theo quãng còn lại (170–560ms), không phải lúc nào cũng 900ms.
+    cancelPendingPoint();
+    const point = d.lastPoint;
+    leafRef.current?.update(point); // vẽ đúng tư thế cuối đang cầm
+    const frac = dragFrac(d.from, d.to, point);
+    const commitFlip = frac > 0.35 || (d.vel > 0.55 && frac > 0.08);
+    const target = commitFlip ? d.to : d.from;
+    const ms = dragSettleMs(d.from, d.to, point);
+    const seq = flipSeqRef.current;
+    void (async () => {
+      if (commitFlip) {
+        // Đảm bảo mặt sau đã decode trước khi lá chạy nốt (tránh nháy đen).
+        const dest = spreadSides(d.next, twoPage, rtl, total);
+        const destPages = [dest.left, dest.right].filter(
+          (p): p is number => p !== null,
+        );
+        await ensure(destPages);
+        await decodeImages(
+          destPages,
+          destPages.map((p) => cacheRef.current.get(p)),
+        );
+      }
+      // Đã bị hủy giữa chừng (đổi bố cục) thì không chạy nốt nữa.
+      if (flipSeqRef.current !== seq) return;
+      cancelTweenRef.current = tweenPoint(
+        ms,
+        commitFlip ? easeOutCubic : easeOutQuint,
+        (k) => lerpPt(point, target, k),
+        applyPoint,
+        () => {
+          cancelTweenRef.current = null;
+          if (commitFlip) finishFlip(d.next);
+          else {
+            // Nảy về: dọn lá, mở khóa, ở nguyên trang cũ.
+            busyRef.current = false;
+            cancelPendingPoint();
+            setCurl(null);
+            setCurlTarget(null);
+            try { window.getSelection()?.removeAllRanges(); } catch { /* bỏ qua */ }
+          }
+        },
+      );
+    })();
   };
 
   // Bôi đen chữ trong chương (chỉ sách chữ): thả chuột xong thì hiện thanh lưu gạch chân.
@@ -1214,22 +1444,6 @@ export default function Reader({
     );
   };
 
-  // Lá đang lật (mặt trước = trang hiện tại, mặt sau = trang đích).
-  // Khi không lật, lá ẩn (opacity 0) nên giá trị mặc định không quan trọng.
-  const activeCurl = curlRef.current;
-  const leafInfo =
-    activeCurl ??
-    leafForFlip(cur, 1, twoPage, rtl, total) ?? {
-      front: cur,
-      back: cur,
-      spineLeft: !rtl,
-      next: cur,
-    };
-  const leafSpineLeft = leafInfo.spineLeft;
-  const leafFront = cacheRef.current.get(leafInfo.front);
-  const leafBack = cacheRef.current.get(leafInfo.back);
-  const leafFrontIndex = leafInfo.front;
-  const leafBackIndex = leafInfo.back;
   // Đánh dấu ở 1 trong 2 trang của spread đang mở thì hiện ★.
   const bookmarkedHere = bookmarks.some(
     (b) => b.page === cur || (twoPage && b.page === cur + 1),
@@ -1385,7 +1599,7 @@ export default function Reader({
             vùng kéo lật giữa trang. Trái = lùi, phải = tới (RTL đảo lại). */}
         <button
           className="nav-zone left"
-          onClick={() => void commit(rtl ? 1 : -1)}
+          onClick={() => startFlip(rtl ? 1 : -1)}
           disabled={cur <= 0}
           aria-label="Trang trước"
         >
@@ -1393,7 +1607,7 @@ export default function Reader({
         </button>
         <button
           className="nav-zone right"
-          onClick={() => void commit(rtl ? -1 : 1)}
+          onClick={() => startFlip(rtl ? -1 : 1)}
           disabled={nextSpread === null}
           aria-label="Trang sau"
         >
@@ -1415,10 +1629,14 @@ export default function Reader({
               className={`spread theme-${pageTheme}${fontSans ? " font-sans" : ""}${useAspectSlots ? " img-book" : ""}`}
               ref={spreadRef}
               style={{
-                perspective: "1600px",
                 width: naturalW,
                 transform: `scale(${scale})`,
-                transformOrigin: "top center",
+                // v0.3.7: origin "top left" — visual khớp đúng khung
+                // scaler. "top center" (cũ) lệch visual khỏi scaler
+                // một đoạn naturalW*(1-scale)/2: full màn lệch trái
+                // ~375px, trang trái cụt + bên phải đen lớn (video
+                // 27/11, xem lib/layout spreadVisualRect).
+                transformOrigin: "top left",
                 "--rfs": `${fontSize}px`,
                 "--rlh": String(lineHeight),
               } as React.CSSProperties}
@@ -1458,53 +1676,27 @@ export default function Reader({
                     {renderFace(right, false, rightIndex ?? shownSpread + 1)}
                   </div>
                 ))}
-              {/* Bóng đổ lên trang đích, đậm dần giữa chừng lật. */}
-              <div
-                ref={shadowRef}
-                className={`curl-shadow${leafSpineLeft ? "" : " flip"}`}
-                style={
-                  !twoPage
-                    ? { left: 0, width: "100%" }
-                    : useAspectSlots
-                      ? {
-                          left: leafSpineLeft ? 0 : leftSlotW,
-                          width: leafSpineLeft ? leftSlotW : rightSlotW,
-                        }
-                      : { left: leafSpineLeft ? "0" : "50%" }
-                }
-              />
-              {/* Lá đang lật: chỉ ôm 1 trang, xoay quanh gáy. Mặt trước = trang
-                  hiện tại, mặt sau = trang đích. CHÚ Ý (v0.2.0): mặt sau KHÔNG
-                  soi gương sẵn nữa — `.leaf-back { rotateY(180deg) }` trong
-                  CSS đã tự triệt tiêu phép soi gương khi lá xoay đủ 180°;
-                  soi thêm scaleX(-1) như bản 0.1.5 làm trang đích hiện
-                  ngược trong suốt nửa sau của cú lật. */}
-              <div
-                ref={leafRef}
-                className="curl-leaf"
-                style={{
-                  // Trang ảnh: lá lật ôm đúng bề rộng slot thật (px), không
-                  // còn "50% spread" như khi slot chia đôi (v0.3.4). Lá ở
-                  // slot phải khi gáy bên trái (spineLeft) và ngược lại.
-                  left: !twoPage
-                    ? 0
-                    : useAspectSlots
-                      ? (leafSpineLeft ? leftSlotW : 0)
-                      : leafSpineLeft
-                        ? "50%"
-                        : "0",
-                  width: !twoPage
-                    ? "100%"
-                    : useAspectSlots
-                      ? (leafSpineLeft ? rightSlotW : leftSlotW)
-                      : "50%",
-                  opacity: 0,
-                }}
-              >
-                <div className="leaf-front">{renderFace(leafFront, false, leafFrontIndex)}</div>
-                <div className="leaf-back">{renderFace(leafBack, false, leafBackIndex)}</div>
-                <div ref={creaseRef} className={`leaf-crease${leafSpineLeft ? "" : " flip"}`} style={{ right: leafSpineLeft ? "auto" : 0, left: leafSpineLeft ? 0 : "auto" }} />
-              </div>
+              {/* Lá lật cong thật (v0.3.7, port từ bản web): chỉ mount
+                  khi đang lật; tọa độ spread (layout px), cha .spread
+                  scale lên theo. Mặt trước = trang đang đọc, mặt sau =
+                  trang đích (đã pre-mirror trong CurlLeaf nên không bị
+                  ngược — xem v0.2.0). */}
+              {curl && (
+                <CurlLeaf
+                  ref={leafRef}
+                  width={naturalW}
+                  height={baseH}
+                  cellX={curl.cellX}
+                  cellW={curl.cellW}
+                  grab={curl.grab}
+                  point={curl.grab}
+                  frontBg={pageTheme === "paper" ? "#f1e5c8" : pageTheme === "night" ? "#1c1a17" : "#fdfcf8"}
+                  backBg={pageTheme === "paper" ? "#f1e5c8" : pageTheme === "night" ? "#1c1a17" : "#fdfcf8"}
+                  dark={isComic}
+                  front={renderFace(cacheRef.current.get(curl.front), false, curl.front)}
+                  back={renderFace(cacheRef.current.get(curl.back), false, curl.back)}
+                />
+              )}
             </div>
           </div>
         </div>
@@ -1658,7 +1850,7 @@ export default function Reader({
 
       {/* Thanh dưới: nút lùi / thanh trượt vị trí / nút tới / số trang. */}
       <footer className="botbar">
-        <button className="botnav" onClick={() => void commit(-1)} disabled={cur <= 0} title="Trang trước (←)">
+        <button className="botnav" onClick={() => startFlip(-1)} disabled={cur <= 0} title="Trang trước (←)">
           ←
         </button>
         <input
@@ -1673,7 +1865,7 @@ export default function Reader({
           onKeyUp={() => commitSlider()}
           onBlur={() => commitSlider()}
         />
-        <button className="botnav" onClick={() => void commit(1)} disabled={nextSpread === null} title="Trang sau (→)">
+        <button className="botnav" onClick={() => startFlip(1)} disabled={nextSpread === null} title="Trang sau (→)">
           →
         </button>
         <span className="botlabel">
