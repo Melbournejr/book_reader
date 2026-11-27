@@ -846,6 +846,9 @@ export default function Reader({
         setCurlTarget(null);
         resetPose();
         busyRef.current = false;
+        // v0.3.5: kéo lật có thể để trình duyệt bôi đen trang ảnh (trang
+        // bị nhuộm xanh, video Thiện gửi) — xóa bôi đen sau mỗi lần lật.
+        try { window.getSelection()?.removeAllRanges(); } catch { /* bỏ qua */ }
       }
     },
     [cur, twoPage, rtl, total, flipOn, zoomedBeyondFit, ensure, decodeImages, animateCurl, onProgress, resetPose],
@@ -1082,6 +1085,20 @@ export default function Reader({
     const d = dragRef.current;
     dragRef.current = null;
     if (!d) return;
+    // v0.3.5: chạm nhẹ (không kéo) = lật trang luôn — trước đây chạm vào
+    // trang không làm gì (lá nảy về), phải kéo đủ dài hoặc bấm nút hẹp ở
+    // mép mới lật được.
+    const moved = Math.hypot(e.clientX - d.grabX, e.clientY - d.grabY);
+    if (moved < 8) {
+      curlRef.current = null;
+      setCurlTarget(null);
+      resetPose();
+      busyRef.current = false;
+      // Xóa mọi bôi đen còn sót (kéo lật có thể để lại, xem dưới).
+      try { window.getSelection()?.removeAllRanges(); } catch { /* bỏ qua */ }
+      void commit(d.dir);
+      return;
+    }
     const g = foldGeometry(
       { x: d.grabX, y: d.grabY },
       { x: e.clientX, y: e.clientY },
@@ -1106,6 +1123,7 @@ export default function Reader({
           setCurlTarget(null);
           resetPose();
           busyRef.current = false;
+          try { window.getSelection()?.removeAllRanges(); } catch { /* bỏ qua */ }
         }
       })();
     } else {
@@ -1115,6 +1133,7 @@ export default function Reader({
         setCurlTarget(null);
         resetPose();
         busyRef.current = false;
+        try { window.getSelection()?.removeAllRanges(); } catch { /* bỏ qua */ }
       });
     }
   };
@@ -1372,7 +1391,7 @@ export default function Reader({
             style={{ width: naturalW * scale, height: Math.max(1, baseH * scale) }}
           >
             <div
-              className={`spread theme-${pageTheme}${fontSans ? " font-sans" : ""}`}
+              className={`spread theme-${pageTheme}${fontSans ? " font-sans" : ""}${useAspectSlots ? " img-book" : ""}`}
               ref={spreadRef}
               style={{
                 perspective: "1600px",
