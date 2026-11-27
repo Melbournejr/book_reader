@@ -196,6 +196,23 @@ không có đọc manga phải → trái. Bản này sửa cả 3 + làm lại g
   không, lật còn ngược không (nhất là truyện ảnh CBZ), manga lật đúng
   chiều + đúng trang chưa, menu mở/đóng có mượt không.
 
+### v0.3.6 — rà soát lại toàn bộ đường lật/bôi đen + hiện số phiên bản (27/11/2026)
+Thiện báo v0.3.5 vẫn lỗi y như v0.3.4 (trang vẫn xanh lè khi kéo lật).
+Rà soát lại toàn bộ thì code v0.3.5 đúng trên lý thuyết (CBZ thì `isComic`
+đúng, class `img-book` có, CSS `user-select: none` có, `removeAllRanges`
+có ở 4 chỗ) — khả năng lớn nhất là máy Thiện vẫn đang chạy bản cũ (cài
+đè trong lúc app đang mở thì file không thay được, hoặc tải về mà chưa
+chạy file cài) nên lỗi y hệt. Để chặn cả 2 khả năng: (1) chặn bôi đen
+thêm 3 lớp nữa — từng slot ảnh có class `img` riêng với `user-select:
+none`, chặn ngay sự kiện `selectstart`/`dragstart` trên spread truyện
+tranh, xóa bôi đen ngay khi bắt đầu kéo (trước đây chỉ xóa sau khi lật
+xong) và cả khi kéo rê lúc zoom; sách chữ vẫn bôi đen được như thường.
+(2) Hiện số phiên bản luôn ở cuối sidebar ("Mio Reader v0.3.6") để Thiện
+nhìn 1 cái là biết máy đang chạy bản nào — trước đây số bản chỉ nằm
+trong sheet Cài đặt, khó kiểm. Chưa kiểm bằng mắt trên máy thật (không
+có WebView ở máy này): lần này Thiện tắt hẳn app rồi mới cài, xong kiểm
+tra sidebar ghi v0.3.6 rồi mới thử kéo lật.
+
 ### v0.3.5 — hết trang xanh lè khi kéo lật + chạm để lật trang (27/11/2026)
 Thiện gửi video: lật truyện thì trang 42 bị nhuộm xanh lè cả trang, kéo
 lật thì nặng, "không thể trải nghiệm nổi". Nguyên nhân: (1) kéo chuột trên
