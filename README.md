@@ -196,6 +196,60 @@ không có đọc manga phải → trái. Bản này sửa cả 3 + làm lại g
   không, lật còn ngược không (nhất là truyện ảnh CBZ), manga lật đúng
   chiều + đúng trang chưa, menu mở/đóng có mượt không.
 
+### v0.3.12 — cuộn quét DỌC song song gáy + hết nền đen dưới lá (28/11/2026)
+Thiện test v0.3.11: "Tao chưa hài lòng với hiệu ứng lật này, mày kiểm
+tra lại đi, làm code ngon hơn." Kèm video 28.4s (CBZ I Am A Hero,
+Trang 17–18 → 19–20/605 RTL, sidebar xác nhận v0.3.11). Lần này Thiện
+lật bằng PHÍM/CHẠM (~1s/cú, nghỉ vài giây giữa các cú — không kéo giữ).
+
+**Chẩn đoán (xem frame video 10fps + đọc code thật):**
+
+1. **Cuộn ĐÃ cong thật** — không còn đường gấp thẳng sắc. Mô hình
+   cylinder curl v0.3.11 giữ nguyên, không phá đi làm lại.
+2. **LỖI 1 — nếp cuộn quét CHÉO.** Frame t≈3.0–3.2s: dải cong chạy
+   chéo từ góc dưới của trang lật lên thay vì quét ngang cả trang như
+   lật giấy thật. Cơ chế (`src/lib/layout.ts:140-166`): điểm nắm đặt
+   ở góc ngoài-DƯỚI (`grab = {x: mép ngoài, y: height}`), điểm điều
+   khiển cung ở y=0.8h nên đường đi của điểm cầm nhấc lên 0.2h; trục
+   uốn vuông góc hướng kéo nên nghiêng ~15° suốt cú lật (đo bằng
+   `foldGeometry`, test v0310), lại neo ở góc dưới nên đọc thành
+   "bóc từ góc". Sửa: lật phím/chạm/nút nắm ở **GIỮA mép ngoài**
+   (`flipGeom(leaf, baseH/2)`) và cung chỉ nhấc nhẹ **0.05·cellW**
+   (`curlArcControl(..., 0.05 * cellW)`) → trục uốn nghiêng tối đa
+   ~6° so với phương thẳng đứng suốt cú lật (đo bằng Node, test
+   v0312), quét dọc song song gáy. Độ cong 3D vẫn do trụ cuộn (R)
+   tạo ra nên trang không thành tấm trượt phẳng. Kéo tay vẫn theo
+   tay, nhưng thêm kẹp góc kéo ≤40° khỏi phương ngang
+   (`clampPullAngle`, `src/lib/curl.ts`) — kéo ngang bình thường
+   không đổi gì, chỉ kéo chéo quá mức mới kẹp (góc giấy lúc đó thấp
+   hơn đầu ngón tay một chút, đánh đổi có chủ ý).
+3. **LỖI 2 — NỀN ĐEN dưới lá.** Frame t≈3.0s và t≈3.2s: vùng dưới
+   lá (slot trang đích) là hình chữ nhật ĐEN bằng nửa trang; trang
+   đích chỉ hiện khi lật đáp (t≈3.5s). Cơ chế: mặt nền đổi sang
+   trang đích cùng lúc lá mount, slot mount `<img>` mới với URL
+   mio-page:// của trang đích — ảnh phải fetch + decode xong mới
+   vẽ, trong lúc chờ slot hiện nền `#111` của `.page-img`
+   (`src/styles.css:340`). Lookahead v0.3.10 đã decode trước nhưng
+   đối tượng `Image` là biến cục bộ, decode xong là thả — GC thu hồi
+   bitmap, lần mount sau lại fetch qua protocol + decode lại
+   (~100–300ms trên CBZ lớn) nên slot đen ~200ms sau khi lật bắt
+   đầu. Trang đang lật thì vẽ ngay được vì ảnh vừa hiện trên spread
+   (còn nóng). Sửa (không await lúc bấm — không quay lại kiểu đứng
+   hình của v0.3.8): (a) **giữ sống ảnh đã decode** — module mới
+   `src/lib/warmImages.ts` (`WarmImageCache`, LRU 8 ảnh: spread hiện
+   tại + lookahead 2 hướng + mặt lá), `decodeImages` giữ `Image`
+   trong cache và chỉ bỏ qua khi ảnh còn được giữ sống (bị đẩy khỏi
+   cache thì decode lại để hâm nóng); (b) **`.page-img` nền trắng
+   giấy `#fff` thay cho `#111`** — dù ảnh có chậm thì slot cũng hiện
+   trang trắng, không bao giờ đen. Lookahead bao phủ 2 hướng đã đúng
+   từ v0.3.10 (kiểm lại bằng test v0312).
+- **Giữ nguyên:** cylinder curl 12 lát, easing chữ S, lookahead,
+  mặt lá đóng băng, pairing RTL, MOBI lười. Không đổi API Rust.
+- **Chưa test được ở đây:** không có WebView trên VM — cảm nhận lật
+  trên máy thật của Thiện mới là cửa cuối: cuộn có quét dọc song
+  song gáy không, trang đích có hiện dưới lá suốt cú lật không (kéo
+  giữ giữa chừng + quay cận cảnh là cách soi rõ nhất).
+
 ### v0.3.11 — lật CUỘN TRỤ thật: trang uốn cong có bán kính, hết nếp gấp thẳng sắc (28/11/2026)
 Thiện test v0.3.10: "Chưa thực sự giải quyết được vấn đề. Tao thấy mày
 gần như là không muốn giải quyết thì phải." Kèm video 28.85s (CBZ I Am A
