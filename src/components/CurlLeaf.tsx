@@ -7,7 +7,7 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
-import { foldGeometry, type FoldGeometry, type Pt } from "../lib/curl";
+import { foldGeometry, ensureFoldPoint, type FoldGeometry, type Pt } from "../lib/curl";
 
 /**
  * Lá lật cong thật — port trực tiếp từ bản web phan-mem-doc-sach
@@ -120,15 +120,19 @@ export const CurlLeaf = forwardRef<CurlLeafHandle, CurlLeafProps>(
       el.style.opacity = `${opacity}`;
     };
 
-    /** Paints the fold for the held point `p` — styles only, no React. */
+    /** Paints the fold for the held point `p` — styles only, no React.
+     *  v0.3.9: điểm giữ được nudge qua `ensureFoldPoint` trước khi tính
+     *  hình học — tư thế suy biến (điểm giữ trùng điểm nắm) không còn
+     *  làm lá biến mất: trước đây `foldGeometry` trả null thì lá bị
+     *  `visibility: hidden` và không bao giờ hiện lại trong cú lật.
+     *  Nếu hình học vẫn null (cell suy biến) thì giữ nguyên tư thế đã
+     *  vẽ thay vì giấu lá. */
     const applyPoint = (p: Pt) => {
       const root = rootRef.current;
       if (!root) return;
-      const geo = foldGeometry(liveRef.current.grab, p, cell, arena);
-      if (!geo) {
-        root.style.visibility = "hidden";
-        return;
-      }
+      const pt = ensureFoldPoint(liveRef.current.grab, p, cell, arena);
+      const geo = foldGeometry(liveRef.current.grab, pt, cell, arena);
+      if (!geo) return;
       root.style.visibility = "visible";
       const d = geo.depth;
       if (shadowOuterRef.current) {
@@ -159,8 +163,12 @@ export const CurlLeaf = forwardRef<CurlLeafHandle, CurlLeafProps>(
 
     useImperativeHandle(ref, () => ({
       update: (p: Pt) => {
-        liveRef.current = { grab: liveRef.current.grab, point: p };
-        applyPoint(p);
+        // Lưu điểm đã nudge để lần render lại giữa lúc lật (vd chrome
+        // full màn tự ẩn/hiện) vẽ lại đúng tư thế đang cầm, không bật
+        // về tư thế suy biến ban đầu.
+        const pt = ensureFoldPoint(liveRef.current.grab, p, cell, arena);
+        liveRef.current = { grab: liveRef.current.grab, point: pt };
+        applyPoint(pt);
       },
     }));
 
@@ -168,7 +176,13 @@ export const CurlLeaf = forwardRef<CurlLeafHandle, CurlLeafProps>(
       applyPoint(liveRef.current.point);
     });
 
-    const geo = foldGeometry(grab, point, cell, arena);
+    // v0.3.9: nudge điểm mount trước khi tính hình học — trước đây
+    // mount với point == grab nên `foldGeometry` trả null, component
+    // trả null, không có DOM nào cho imperative handle viết vào, lá
+    // tàng hình suốt cả cú lật (v0.3.7–v0.3.8). Giờ lá luôn mount được
+    // với hình học hợp lệ (xem ensureFoldPoint trong lib/curl.ts).
+    const safePoint = ensureFoldPoint(grab, point, cell, arena);
+    const geo = foldGeometry(grab, safePoint, cell, arena);
     if (!geo) return null;
     const shadeRgb = dark ? "0, 0, 0" : "62, 38, 12";
     const layer: CSSProperties = {

@@ -54,10 +54,14 @@ import {
 import { isComicFormat } from "../lib/spread";
 
 export interface ReaderPage {
-  /** Ảnh (data URL) hoặc HTML chương EPUB. */
+  /** Ảnh (URL protocol `mio-page://` hoặc data URL) hoặc HTML chương EPUB. */
   content: string;
   isImage: boolean;
   label: string;
+  /** v0.3.9: fallback khi ảnh protocol lỗi (vd file đã đổi/xóa sau khi
+   *  mở) — trả về data URL base64 qua lệnh `cbz_page`. Reader dùng nó
+   *  trong `onError` của <img>, chỉ thử 1 lần rồi thôi. */
+  fallback?: () => Promise<string>;
 }
 
 /** Trạng thái một cú lật cong đang diễn ra (đủ để mount CurlLeaf).
@@ -72,6 +76,12 @@ interface CurlState {
   mirror: Pt;
   next: number;
   dir: 1 | -1;
+  /** v0.3.9: điểm giữ lúc mount lá — PHẢI chếch vào trong cú lật
+   *  (path(easeOutQuart(0.03)) với lật phím/nút, điểm tay hiện tại với
+   *  lật kéo). Trước đây JSX truyền point=grab nên foldGeometry trả
+   *  null, CurlLeaf trả null, lá tàng hình suốt cả cú lật (v0.3.7–
+   *  v0.3.8). Xem lib/curl.ts ensureFoldPoint. */
+  point: Pt;
   /** Nền từng bên trong lúc lật (tính sẵn cho đúng cú lật này, dọn cùng
    *  lúc với lá — mô hình bản web, thay cho curlTarget toàn cục). */
   base: { left: number | null; right: number | null };
@@ -98,6 +108,10 @@ interface PendingDrag {
   startX: number;
   startY: number;
   dir: 1 | -1;
+  /** v0.3.9: mặt bấm xuống có phải ảnh không. Sách chữ: kéo là bôi đen
+   *  chữ (không kéo lật), nhưng chạm nhẹ (<8px) vẫn lật trang — trước
+   *  đây chạm vào trang chữ không làm gì cả. */
+  isImage: boolean;
 }
 
 /** Khả năng tìm trong sách: null = sách ảnh, không tìm được chữ trong tranh. */
@@ -229,7 +243,10 @@ export default function Reader({
     if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
     toastTimerRef.current = window.setTimeout(() => setToast(null), 2600);
   }, []);
-  const [, setCacheVersion] = useState(0);
+  // v0.3.9: giữ lại giá trị cacheVersion — effect thử lại trang lỗi
+  // cần chạy lại mỗi khi cache đổi (trang vừa nạp xong thì không thử
+  // lại nữa). Trước đây giá trị bị bỏ (chỉ dùng setter).
+  const [cacheVersion, setCacheVersion] = useState(0);
 
   // ---- v0.3.4: tỉ lệ thật của từng trang ảnh (rộng/cao) ----
   // Trước đây spread rộng cố định 1200px, mỗi slot chia đôi đúng 600px,
@@ -330,7 +347,6 @@ export default function Reader({
   const curlRef = useRef<CurlState | null>(null);
   const leafRef = useRef<CurlLeafHandle | null>(null);
   const cancelTweenRef = useRef<(() => void) | null>(null);
-  const flipSeqRef = useRef(0);
   const pointRafRef = useRef(0);
   const pendingPointRef = useRef<Pt | null>(null);
   // Kéo chuột: điểm nắm + điểm đáp (tọa độ spread), vận tốc đã làm mượt
@@ -593,6 +609,31 @@ export default function Reader({
     void ensure(pages);
   }, [cur, nextSpread, ensure]);
 
+  // v0.3.9: trang hiện tại nạp lỗi thì thử lại sau 1.5s (tối đa 2 lần
+  // mỗi spread). Trước đây trang lỗi thì kẹt ở "Đang tải trang…" cho
+  // tới khi đổi spread — vì effect nạp chỉ chạy khi cur đổi, và ensure
+  // nuốt lỗi nạp không thử lại. Đây là cơ chế gây "trang đen 7 giây"
+  // ở video 2: img chưa decode thì slot đen, không có gì kích hoạt
+  // nạp lại. Giới hạn 2 lần để trang hỏng hẳn không thử lại vô hạn.
+  const retryStateRef = useRef({ cur: -1, count: 0 });
+  useEffect(() => {
+    if (retryStateRef.current.cur !== cur) {
+      retryStateRef.current = { cur, count: 0 };
+    }
+    const t = setTimeout(() => {
+      const pages = [cur, cur + 1];
+      if (nextSpread !== null) pages.push(nextSpread, nextSpread + 1);
+      const missing = pages.filter(
+        (p) => p >= 0 && p < total && !cacheRef.current.has(p) && !pendingRef.current.has(p),
+      );
+      if (missing.length > 0 && retryStateRef.current.count < 2) {
+        retryStateRef.current.count++;
+        void ensure(missing);
+      }
+    }, 1500);
+    return () => clearTimeout(t);
+  }, [cur, nextSpread, total, cacheVersion, ensure]);
+
   // Vẽ lại gạch chân + xóa đánh dấu tìm cũ mỗi khi đổi trang.
   useEffect(() => {
     const spreadEl = spreadRef.current;
@@ -611,9 +652,6 @@ export default function Reader({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cur, isTextBook, highlights]);
 
-  // Nhảy tới 1 trang bất kỳ (bookmark / highlight / lưới / tìm).
-  // v0.3.8: chờ nạp + giải mã xong mới đổi spread — trước đây nhảy
-  // ngay (void ensure) nên nhãn đổi trước, ảnh về sau (lệch nhãn/ảnh).
   // decodeImages phải khai báo trước jumpTo (jumpTo dùng nó).
   const decodeImages = useCallback(async (indices: number[], pages: (ReaderPage | undefined)[]) => {
     await Promise.all(
@@ -631,21 +669,48 @@ export default function Reader({
     );
   }, [noteAspect]);
 
+  // v0.3.9: chờ 1 promise nhưng tối đa `ms` — quá hạn thì tiếp tục với
+  // trang placeholder thay vì treo mãi (vd Rust invoke treo, img.decode
+  // treo). Lần nạp gốc vẫn chạy nền và điền cache khi xong; effect thử
+  // lại sẽ hiện trang khi nạp được.
+  const withTimeout = <T,>(p: Promise<T>, ms: number): Promise<T | null> =>
+    Promise.race([
+      p,
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), ms)),
+    ]);
+
+  // Nhảy tới 1 trang bất kỳ (bookmark / highlight / lưới / tìm).
+  // v0.3.8: chờ nạp + giải mã xong mới đổi spread — trước đây nhảy
+  // ngay (void ensure) nên nhãn đổi trước, ảnh về sau (lệch nhãn/ảnh).
+  // decodeImages phải khai báo trước jumpTo (jumpTo dùng nó).
+  // v0.3.9: hủy lá đang lật trước (trước đây nhảy giữa lúc lật để lại
+  // curl.base cũ hiển thị trong khi cur đã đổi — nhãn 1 mà ảnh là
+  // spread cuối), và chờ tối đa 8s rồi nhảy tiếp với placeholder.
   const jumpTo = useCallback(
     async (page: number) => {
       // Lật tay thì dừng TTS (trừ lúc TTS tự lật sang trang sau).
       if (!ttsAutoRef.current) stopTtsRef.current();
+      cancelFlip();
       const n = Math.max(0, Math.min(total - 1, page));
       const pages = [n, n + 1];
-      await ensure(pages);
-      await decodeImages(
-        pages,
-        pages.map((p) => cacheRef.current.get(p)),
+      await withTimeout(
+        (async () => {
+          await ensure(pages);
+          await decodeImages(
+            pages,
+            pages.map((p) => cacheRef.current.get(p)),
+          );
+        })(),
+        8000,
       );
       setSpread(spreadStartForPage(n, twoPage, rtl, total));
       onProgress(n, total);
       setSheet(null);
     },
+    // cancelFlip không nằm trong deps vì khai báo sau jumpTo (TDZ) —
+    // nhưng nó ổn định (deps của nó đều ổn định: stopTween,
+    // cancelPendingPoint, setCurl) nên closure không bị cũ.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [total, twoPage, rtl, ensure, decodeImages, onProgress],
   );
 
@@ -939,9 +1004,10 @@ export default function Reader({
   );
 
   /** Hủy cú lật đang chạy: đổi bố cục giữa chừng thì lá rách vì cell/
-   *  gáy đã cũ (bản web cũng hủy lật khi đổi fit/dual/direction). */
+   *  gáy đã cũ (bản web cũng hủy lật khi đổi fit/dual/direction).
+   *  v0.3.9: không còn dùng số thế hệ (flipSeqRef) — mọi đường lật đã
+   *  mount đồng bộ, không còn khoảng chờ async cần vô hiệu hóa. */
   const cancelFlip = useCallback(() => {
-    flipSeqRef.current++;
     busyRef.current = false;
     stopTween();
     cancelPendingPoint();
@@ -976,9 +1042,22 @@ export default function Reader({
   );
 
   /** Lật có hiệu ứng (phím/nút/chạm/mép): lá cong quét theo cung
-   *  ~900ms, easeOutQuart — thay thế commit() cũ (tấm phẳng rotateY).
-   *  Nạp + giải mã spread đích TRƯỚC khi lật để mặt sau không nháy
-   *  đen lúc mới hiện (bản web cũng chờ decode xong mới cho lá chạy).
+   *  ~900ms, easeOutQuart.
+   *
+   *  v0.3.9 — LẬT PHẢN HỒI NGAY (mô hình trình xem video, thay cho
+   *  "chờ decode xong mới lật" của v0.3.8):
+   *  - Lá mount + tween chạy NGAY LẬP TỨC, không await gì trước đó.
+   *    Trước đây startFlip await ensure (4 trang qua invoke) +
+   *    decodeImages (4 lần giải mã base64 vài MB) rồi mới mount lá —
+   *    mỗi lần bấm phím/chạm đều đứng hình ~0.2–1s rồi trang nhảy
+   *    tức thì (lá lại tàng hình vì point=grab), cảm giác "đơ lắm".
+   *  - ensure + decodeImages chạy NỀN (fire-and-forget): effect nạp
+   *    trước thường đã có sẵn trang đích trong cache; nếu chưa có, mặt
+   *    sau của lá hiện placeholder "Đang tải trang…" rồi tự đổi thành
+   *    trang thật khi nạp xong (ensure tăng cacheVersion -> render lại),
+   *    không bao giờ hiện sai trang, không bao giờ đứng hình.
+   *  - Nhãn chỉ đổi ở finishFlip (cuối tween) như cũ — không lệch
+   *    nhãn/ảnh.
    *  Không chờ tween: khóa busyRef giữ tới khi finishFlip dọn. */
   const startFlip = useCallback(
     (dir: 1 | -1) => {
@@ -989,72 +1068,71 @@ export default function Reader({
       if (!leaf) return;
       // Lật tay thì dừng TTS (trừ lúc TTS tự lật sang trang sau).
       if (!ttsAutoRef.current) stopTtsRef.current();
-      busyRef.current = true;
-      const seq = ++flipSeqRef.current;
+      // Zoom vượt vừa trang thì không lật cong nữa, nhảy thẳng trang.
+      if (
+        !flipOn ||
+        zoomedBeyondFit ||
+        window.matchMedia("(prefers-reduced-motion: reduce)").matches
+      ) {
+        finishFlip(leaf.next);
+        return;
+      }
+      // Nền của đúng cú lật này (bên lật = trang đích, bên còn lại
+      // = trang hiện tại) + mặt trước/sau của lá — nạp + giải mã NỀN,
+      // không chặn lá (xem ghi chú ở trên).
+      const base = flipBaseSides(leaf, cur, twoPage, rtl, total);
+      const flipPages = [leaf.front, leaf.back, base.left, base.right].filter(
+        (p): p is number => p !== null,
+      );
       void (async () => {
         try {
-          // Nền của đúng cú lật này (bên lật = trang đích, bên còn lại
-          // = trang hiện tại) + mặt trước/sau của lá — nạp + giải mã
-          // TẤT CẢ trước khi mount lá và trước khi commit nhãn.
-          const base = flipBaseSides(leaf, cur, twoPage, rtl, total);
-          const flipPages = [leaf.front, leaf.back, base.left, base.right].filter(
-            (p): p is number => p !== null,
-          );
           await ensure(flipPages);
           await decodeImages(
             flipPages,
             flipPages.map((p) => cacheRef.current.get(p)),
           );
-          if (flipSeqRef.current !== seq) return; // bị hủy khi đang nạp
-          // Zoom vượt vừa trang thì không lật cong nữa, nhảy thẳng trang.
-          if (
-            !flipOn ||
-            zoomedBeyondFit ||
-            window.matchMedia("(prefers-reduced-motion: reduce)").matches
-          ) {
-            finishFlip(leaf.next);
-            return;
-          }
-          const g = flipGeom(leaf);
-          const p0 = g.grab;
-          const p1 = g.mirror;
-          const ctrl = curlArcControl(p0, p1, baseH);
-          const path = (k: number) => quadBezier(p0, ctrl, p1, k);
-          // Mount lá hơi chếch vào trong cú lật để 2 mặt đều là trang
-          // thật đã vẽ xong, rồi để 2 khung hình trôi qua mới cho lá
-          // chạy (tweenPoint preFrames): mount và chuyển động giành
-          // nhau cùng khung hình sẽ làm lật giật ngay lúc bắt đầu.
-          setCurl({
-            front: leaf.front,
-            back: leaf.back,
-            cellX: g.cellX,
-            cellW: g.cellW,
-            grab: g.grab,
-            mirror: g.mirror,
-            next: leaf.next,
-            dir,
-            base,
-          });
-          cancelTweenRef.current = tweenPoint(
-            FLIP_MS,
-            easeOutQuart,
-            path,
-            applyPoint,
-            () => {
-              cancelTweenRef.current = null;
-              finishFlip(leaf.next);
-            },
-            2,
-            0.03,
-          );
         } catch {
-          // Nạp lỗi thì vẫn dọn khóa (tránh kẹt không lật được nữa).
-          if (flipSeqRef.current === seq) {
-            busyRef.current = false;
-            setCurl(null);
-          }
+          // Nạp nền lỗi thì kệ — mặt lá hiện placeholder, effect thử
+          // lại sẽ điền trang khi nạp được.
         }
       })();
+      busyRef.current = true;
+      const g = flipGeom(leaf);
+      const p0 = g.grab;
+      const p1 = g.mirror;
+      const ctrl = curlArcControl(p0, p1, baseH);
+      const path = (k: number) => quadBezier(p0, ctrl, p1, k);
+      // Mount lá hơi chếch vào trong cú lật để 2 mặt đều là trang thật
+      // đã vẽ xong, rồi để 2 khung hình trôi qua mới cho lá chạy
+      // (tweenPoint preFrames): mount và chuyển động giành nhau cùng
+      // khung hình sẽ làm lật giật ngay lúc bắt đầu. Điểm mount PHẢI
+      // là path(easeOutQuart(0.03)) như bản web — mount ở đúng điểm
+      // nắm (point=grab) làm foldGeometry trả null, lá tàng hình
+      // (v0.3.7–v0.3.8).
+      setCurl({
+        front: leaf.front,
+        back: leaf.back,
+        cellX: g.cellX,
+        cellW: g.cellW,
+        grab: g.grab,
+        mirror: g.mirror,
+        point: path(easeOutQuart(0.03)),
+        next: leaf.next,
+        dir,
+        base,
+      });
+      cancelTweenRef.current = tweenPoint(
+        FLIP_MS,
+        easeOutQuart,
+        path,
+        applyPoint,
+        () => {
+          cancelTweenRef.current = null;
+          finishFlip(leaf.next);
+        },
+        2,
+        0.03,
+      );
     },
     [
       cur,
@@ -1279,10 +1357,12 @@ export default function Reader({
 
   // v0.3.8: bấm xuống CHỈ ghi nhận (bản web: pendingDragRef) — chưa
   // mount lá, chưa khóa lật. Lá chỉ mount sau khi tay di chuyển >9px
-  // (xem onPointerMove → beginDragFlip), sau khi trang đích đã nạp +
-  // giải mã xong. Trước đây onPointerDown mount lá ngay với chỉ 1 lần
-  // nạp trước không chờ (mặt sau có thể chưa decode), nên lật nhanh thì
-  // nhãn commit trước còn ảnh hiện sau — lệch nhãn/ảnh.
+  // (xem onPointerMove → beginDragFlip).
+  // v0.3.9: sách chữ cũng ghi nhận — chạm nhẹ (<8px) thì lật trang
+  // (Thiện lật bằng chạm nhẹ vào trang; trước đây chạm vào trang chữ
+  // không làm gì cả). Kéo chuột trên trang chữ vẫn là bôi đen chữ,
+  // không kéo lật (xem onPointerMove), và không capture con trỏ để
+  // thao tác bôi đen gốc của trình duyệt vẫn chạy.
   const onPointerDown = (e: React.PointerEvent, dir: 1 | -1, slot: "left" | "right") => {
     if (busyRef.current || dragMountingRef.current || !flipOn) return;
     if (e.pointerType === "mouse" && e.button !== 0) return;
@@ -1294,11 +1374,10 @@ export default function Reader({
       try { el.setPointerCapture(e.pointerId); } catch { /* bỏ qua */ }
       return;
     }
-    // Sách chữ: kéo chuột để bôi đen chữ, không kéo lật (lật bằng nút/phím).
     // v0.3.8: lấy trang của spread HIỆN TẠI (curLeft/curRight), không lấy
     // nền đang lật — nền có thể hiện trang đích.
     const slotPage = slot === "left" ? curLeft : curRight;
-    if (slotPage && !slotPage.isImage) return;
+    const isImage = slotPage ? slotPage.isImage : false;
     const leaf = leafForFlip(cur, dir, twoPage, rtl, total);
     if (!leaf) return;
     pendingDragRef.current = {
@@ -1306,19 +1385,27 @@ export default function Reader({
       startX: e.clientX,
       startY: e.clientY,
       dir,
+      isImage,
     };
     latestClientRef.current = { x: e.clientX, y: e.clientY };
-    try { el.setPointerCapture(e.pointerId); } catch { /* bỏ qua */ }
+    // Chỉ capture con trỏ với mặt ảnh (kéo lật). Mặt chữ không capture
+    // để bôi đen chữ vẫn chọn được bình thường.
+    if (isImage) {
+      try { el.setPointerCapture(e.pointerId); } catch { /* bỏ qua */ }
+    }
   };
 
-  /** Bắt đầu cú kéo lật sau khi tay đã di chuyển >9px: nạp + giải mã
-   *  trang đích xong mới mount lá (không commit nhãn sớm). Thả tay
-   *  giữa lúc đang chờ thì hủy mount (pending đã mất). */
-  const beginDragFlip = useCallback(async (pending: PendingDrag) => {
+  /** Bắt đầu cú kéo lật sau khi tay đã di chuyển >9px: mount lá NGAY
+   *  với điểm tay hiện tại, nạp + giải mã trang đích NỀN (v0.3.9 —
+   *  trước đây chờ decode xong mới mount nên kéo >9px mà lá không
+   *  theo tay, cảm giác đơ). Thả tay giữa chừng thì settleDrag xử lý. */
+  const beginDragFlip = useCallback((pending: PendingDrag) => {
     if (busyRef.current || dragMountingRef.current) return;
+    if (!pendingDragRef.current || pendingDragRef.current.pointerId !== pending.pointerId) {
+      return; // thả tay rồi — không mount nữa
+    }
     busyRef.current = true;
     dragMountingRef.current = true;
-    const seq = flipSeqRef.current;
     try {
       const leaf = leafForFlip(cur, pending.dir, twoPage, rtl, total);
       if (!leaf) return;
@@ -1326,15 +1413,18 @@ export default function Reader({
       const flipPages = [leaf.front, leaf.back, base.left, base.right].filter(
         (p): p is number => p !== null,
       );
-      await ensure(flipPages);
-      await decodeImages(
-        flipPages,
-        flipPages.map((p) => cacheRef.current.get(p)),
-      );
-      if (flipSeqRef.current !== seq) return; // bị hủy khi đang nạp
-      if (!pendingDragRef.current || pendingDragRef.current.pointerId !== pending.pointerId) {
-        return; // thả tay rồi — không mount nữa
-      }
+      // Nạp + giải mã nền, không chặn lá (như startFlip).
+      void (async () => {
+        try {
+          await ensure(flipPages);
+          await decodeImages(
+            flipPages,
+            flipPages.map((p) => cacheRef.current.get(p)),
+          );
+        } catch {
+          // Kệ — mặt lá hiện placeholder, thử lại sau.
+        }
+      })();
       // Điểm nắm = đúng chỗ tay bấm, kẹp trong cell đang lật (bản web
       // cũng kẹp tay nắm cách gáy một đoạn ngắn để nếp gấp không bị lật
       // ngược khi tay bấm sát gáy).
@@ -1355,6 +1445,12 @@ export default function Reader({
       // v0.3.6: xóa bôi đen cũ ngay khi bắt đầu kéo — bôi đen cũ còn sót
       // sẽ nhuộm trang xanh (lỗi Thiện báo ở v0.3.5 vẫn còn y như v0.3.4).
       try { window.getSelection()?.removeAllRanges(); } catch { /* bỏ qua */ }
+      const ptNow =
+        toSpreadPoint(latestClientRef.current.x, latestClientRef.current.y) ?? grab;
+      const point = clampDragPoint(grab, to, ptNow.x, ptNow.y, baseH);
+      // point = điểm tay HIỆN TẠI (đã kẹp theo cung lật) — lá mount
+      // với điểm này nên foldGeometry có nghiệm, lá hiện ngay theo tay
+      // (trước đây mount ở grab nên lá tàng hình).
       setCurl({
         front: leaf.front,
         back: leaf.back,
@@ -1362,13 +1458,11 @@ export default function Reader({
         cellW,
         grab,
         mirror: to,
+        point,
         next: leaf.next,
         dir: pending.dir,
         base,
       });
-      const ptNow =
-        toSpreadPoint(latestClientRef.current.x, latestClientRef.current.y) ?? grab;
-      const point = clampDragPoint(grab, to, ptNow.x, ptNow.y, baseH);
       dragRef.current = {
         grab,
         from: grab,
@@ -1391,47 +1485,55 @@ export default function Reader({
   }, [cur, twoPage, rtl, total, ensure, decodeImages, flipGeom, toSpreadPoint, baseH, pushPoint]);
 
   /** Chạy nốt cú kéo đang diễn ra: commit=true thì lật hẳn, false thì
-   *  lá nảy về trang cũ. Dùng chung cho thả tay và pointer bị hủy. */
+   *  lá nảy về trang cũ. Dùng chung cho thả tay và pointer bị hủy.
+   *
+   *  v0.3.9: tween chạy NGAY khi thả tay — không chờ decode nữa
+   *  (trước đây chờ ensure+decode 2 trang đích rồi mới chạy nốt nên
+   *  thả tay xong vẫn đứng hình một nhịp rồi mới lật). Trang đích nạp
+   *  + giải mã nền; mặt sau lá hiện placeholder nếu chưa xong, tự
+   *  đổi thành trang thật khi nạp xong. */
   const settleDrag = useCallback((d: DragState, commit: boolean) => {
     cancelPendingPoint();
     const point = d.lastPoint;
     leafRef.current?.update(point); // vẽ đúng tư thế cuối đang cầm
     const target = commit ? d.to : d.from;
     const ms = dragSettleMs(d.from, d.to, point);
-    const seq = flipSeqRef.current;
-    void (async () => {
-      if (commit) {
-        // Đảm bảo mặt sau đã decode trước khi lá chạy nốt (tránh nháy đen).
-        const dest = spreadSides(d.next, twoPage, rtl, total);
-        const destPages = [dest.left, dest.right].filter(
-          (p): p is number => p !== null,
-        );
-        await ensure(destPages);
-        await decodeImages(
-          destPages,
-          destPages.map((p) => cacheRef.current.get(p)),
-        );
-      }
-      // Đã bị hủy giữa chừng (đổi bố cục) thì không chạy nốt nữa.
-      if (flipSeqRef.current !== seq) return;
-      cancelTweenRef.current = tweenPoint(
-        ms,
-        commit ? easeOutCubic : easeOutQuint,
-        (k) => lerpPt(point, target, k),
-        applyPoint,
-        () => {
-          cancelTweenRef.current = null;
-          if (commit) finishFlip(d.next);
-          else {
-            // Nảy về: dọn lá, mở khóa, ở nguyên trang cũ.
-            busyRef.current = false;
-            cancelPendingPoint();
-            setCurl(null);
-            try { window.getSelection()?.removeAllRanges(); } catch { /* bỏ qua */ }
-          }
-        },
+    if (commit) {
+      // Nạp nền trang đích để mặt sau kịp nét khi lá đáp — không chặn
+      // tween (xem ghi chú ở trên).
+      const dest = spreadSides(d.next, twoPage, rtl, total);
+      const destPages = [dest.left, dest.right].filter(
+        (p): p is number => p !== null,
       );
-    })();
+      void (async () => {
+        try {
+          await ensure(destPages);
+          await decodeImages(
+            destPages,
+            destPages.map((p) => cacheRef.current.get(p)),
+          );
+        } catch {
+          // Kệ — effect thử lại sẽ điền trang khi nạp được.
+        }
+      })();
+    }
+    cancelTweenRef.current = tweenPoint(
+      ms,
+      commit ? easeOutCubic : easeOutQuint,
+      (k) => lerpPt(point, target, k),
+      applyPoint,
+      () => {
+        cancelTweenRef.current = null;
+        if (commit) finishFlip(d.next);
+        else {
+          // Nảy về: dọn lá, mở khóa, ở nguyên trang cũ.
+          busyRef.current = false;
+          cancelPendingPoint();
+          setCurl(null);
+          try { window.getSelection()?.removeAllRanges(); } catch { /* bỏ qua */ }
+        }
+      },
+    );
   }, [twoPage, rtl, total, ensure, decodeImages, applyPoint, finishFlip, cancelPendingPoint]);
   const onPointerMove = (e: React.PointerEvent) => {
     const pan = panRef.current;
@@ -1469,13 +1571,19 @@ export default function Reader({
       return;
     }
     // Chưa đủ 9px thì chỉ ghi nhận vị trí (bản web: pendingDragRef) —
-    // chưa mount lá. Vượt 9px thì bắt đầu kéo (mount lá sau khi decode).
+    // chưa mount lá. Vượt 9px thì bắt đầu kéo (mount lá ngay).
     const p = pendingDragRef.current;
     if (!p || e.pointerId !== p.pointerId) return;
     latestClientRef.current = { x: e.clientX, y: e.clientY };
     const moved = Math.hypot(e.clientX - p.startX, e.clientY - p.startY);
+    // Sách chữ: kéo là bôi đen chữ, không kéo lật — kéo quá 8px thì
+    // hủy chờ chạm để lần chạm sau không bị tính nhầm thành chạm nhẹ.
+    if (!p.isImage) {
+      if (moved >= 8) pendingDragRef.current = null;
+      return;
+    }
     if (moved < 9) return;
-    void beginDragFlip(p);
+    beginDragFlip(p);
   };
   const onPointerUp = (e: React.PointerEvent) => {
     if (panRef.current) {
@@ -1502,15 +1610,14 @@ export default function Reader({
     if (moved < 8) {
       // v0.3.5: chạm nhẹ (không kéo) = lật trang luôn — trước đây chạm
       // vào trang không làm gì (lá nảy về), phải kéo đủ dài hoặc bấm
-      // nút hẹp ở mép mới lật được. startFlip tự chờ decode xong mới
-      // commit nhãn nên không lệch nhãn/ảnh.
+      // nút hẹp ở mép mới lật được. v0.3.9: áp dụng cả cho trang chữ
+      // (chạm nhẹ vào trang chữ cũng lật; kéo chữ vẫn bôi đen).
       try { window.getSelection()?.removeAllRanges(); } catch { /* bỏ qua */ }
       startFlip(p.dir);
       return;
     }
-    // Kéo quá 9px nhưng lá chưa kịp mount (đang chờ decode) — hủy
-    // mount (beginDragFlip thấy pending đã mất mà dừng), không lật.
-    // busyRef được mở lại trong finally của beginDragFlip.
+    // Kéo 8–9px: chưa đủ ngưỡng kéo lật, cũng không còn là chạm nhẹ
+    // — không lật, không làm gì.
   };
 
   // Pointer bị hủy giữa chừng (vd cửa sổ mất focus, hệ thống ngắt cử
@@ -1558,11 +1665,30 @@ export default function Reader({
   // URL base64 vài MB giải mã bất đồng bộ, lật nhanh thì các lần giải
   // mã hoàn thành không theo thứ tự → ảnh hiện sai spread). Trang chưa
   // nạp xong hiện "Đang tải trang…" thay vì ảnh sai.
+  // v0.3.9: ảnh protocol (mio-page://) lỗi thì thử 1 lần fallback
+  // base64 qua ReaderPage.fallback (vd file đã đổi/xóa sau khi mở) —
+  // trang vẫn hiện, chỉ chậm hơn. Không thử lại vô hạn.
   const renderFace = (p: ReaderPage | undefined, mirrored: boolean, pageIndex: number) => {
     if (!p) {
       return <div key={pageIndex} className="page-face page-loading">Đang tải trang…</div>;
     }
     const cropActive = p.isImage && hasCrop(crop);
+    const onImgError = p.isImage && p.fallback
+      ? (e: React.SyntheticEvent<HTMLImageElement>) => {
+          const img = e.currentTarget;
+          if (img.dataset.fallbackTried) return;
+          img.dataset.fallbackTried = "1";
+          void p
+            .fallback?.()
+            .then((dataUrl) => {
+              if (dataUrl) img.src = dataUrl;
+            })
+            .catch(() => {
+              // Fallback cũng lỗi thì để nguyên — slot hiện nền đen của
+              // .page-img, effect thử lại sẽ nạp lại trang sau 1.5s.
+            });
+        }
+      : undefined;
     return (
       <div key={pageIndex} className="page-face" style={mirrored ? { transform: "scaleX(-1)" } : undefined}>
         {p.isImage ? (
@@ -1573,6 +1699,7 @@ export default function Reader({
             alt={p.label}
             draggable={false}
             onLoad={(e) => noteAspect(pageIndex, e.currentTarget.naturalWidth, e.currentTarget.naturalHeight)}
+            onError={onImgError}
             style={cropActive ? cropImgStyle(crop) : undefined}
           />
         ) : (
@@ -1599,21 +1726,29 @@ export default function Reader({
   // + nạp lại toàn bộ lịch sử nên kéo trượt giật, cứng.
   // v0.3.8: thả ra thì chờ nạp + giải mã xong mới đổi spread — như
   // jumpTo, nhãn không đổi trước ảnh.
+  // v0.3.9: hủy lá đang lật trước (như jumpTo), chờ tối đa 8s rồi nhảy
+  // tiếp với placeholder — không treo ở slider nữa.
   const commitSlider = useCallback(async () => {
     if (sliderVal === null) return;
     const n = sliderVal;
     setSliderVal(null);
     if (n === cur) return;
     stopTtsRef.current();
+    cancelFlip();
     const pages = [n, n + 1];
-    await ensure(pages);
-    await decodeImages(
-      pages,
-      pages.map((p) => cacheRef.current.get(p)),
+    await withTimeout(
+      (async () => {
+        await ensure(pages);
+        await decodeImages(
+          pages,
+          pages.map((p) => cacheRef.current.get(p)),
+        );
+      })(),
+      8000,
     );
     setSpread(spreadStartForPage(n, twoPage, rtl, total));
     onProgress(n, total);
-  }, [sliderVal, cur, twoPage, rtl, total, ensure, decodeImages, onProgress]);
+  }, [sliderVal, cur, twoPage, rtl, total, ensure, decodeImages, onProgress, cancelFlip]);
 
   return (
     <div
@@ -1849,7 +1984,7 @@ export default function Reader({
                   cellX={curl.cellX}
                   cellW={curl.cellW}
                   grab={curl.grab}
-                  point={curl.grab}
+                  point={curl.point}
                   frontBg={pageTheme === "paper" ? "#f1e5c8" : pageTheme === "night" ? "#1c1a17" : "#fdfcf8"}
                   backBg={pageTheme === "paper" ? "#f1e5c8" : pageTheme === "night" ? "#1c1a17" : "#fdfcf8"}
                   dark={isComic}
