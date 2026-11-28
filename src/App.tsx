@@ -22,8 +22,8 @@ import StatsView from "./components/StatsView";
 import FolderTree from "./components/FolderTree";
 import SourcesView from "./components/SourcesView";
 import UpdateBanner from "./components/UpdateBanner";
-import { parseMobi } from "./lib/mobi";
 import { readFileBytes } from "./lib/files";
+import { pageUrl } from "./lib/pageUrl";
 import { searchTextPages, stripHtml } from "./lib/search";
 import { downscaleDataUrl } from "./lib/thumbs";
 import { resolveInitialRtl } from "./lib/spread";
@@ -276,11 +276,23 @@ export default function App() {
       if (meta.format === "cbz") {
         const names = await api.cbzIndex(meta.path);
         const total = names.length;
-        // Nạp trước trang đầu + 2 trang kề, còn lại nạp khi lật tới.
-        const load = async (i: number): Promise<ReaderPage> => {
-          const p = await api.cbzPage(meta.path, i);
-          return { content: p.data_url, isImage: true, label: names[i] };
-        };
+        // v0.3.9: trang nạp qua URL protocol mio-page:// (Rust phục vụ
+        // đúng 1 entry trong ZIP) thay vì base64 qua invoke — ảnh nạp
+        // như ảnh web bình thường: bất đồng bộ, cache theo URL, giải
+        // mã ngoài luồng chính (đúng mô hình blob URL của bản web mà
+        // Thiện khen mượt). fallback base64 dùng khi protocol lỗi
+        // (vd file đã đổi/xóa sau khi mở) — trang vẫn hiện, chỉ chậm.
+        const load = async (i: number): Promise<ReaderPage> => ({
+          content: pageUrl("cbz", meta.path, i),
+          isImage: true,
+          label: names[i],
+          fallback: async () => {
+            const p = await api.cbzPage(meta.path, i);
+            return p.data_url;
+          },
+        });
+        // Nạp trước trang đầu + 2 trang kề (chỉ tạo URL, không tải
+        // byte nào), còn lại nạp khi lật tới.
         const first = await Promise.all(
           [startPage, startPage + 1, startPage + 2]
             .filter((i) => i < total)
@@ -293,10 +305,12 @@ export default function App() {
           initialPages[startPage + k] = p;
         });
         // Truyện ảnh: không tìm được chữ trong tranh; thumbnail thu nhỏ
-        // từ trang đầy đủ khi lưới trang cuộn tới.
+        // từ trang đầy đủ khi lưới trang cuộn tới. Thumbnail dùng base64
+        // riêng (downscaleDataUrl đọc qua fetch — fetch không đọc được
+        // protocol URL của ảnh gốc nếu chưa cache, nên vẫn lấy base64).
         const thumb = async (i: number): Promise<string | null> => {
-          const p = await load(i);
-          return p.isImage ? downscaleDataUrl(p.content) : null;
+          const p = await api.cbzPage(meta.path, i);
+          return downscaleDataUrl(p.data_url);
         };
         setReader({
           total,
@@ -388,20 +402,37 @@ export default function App() {
           format: "pdf",
         });
       } else if (meta.format === "mobi") {
-        const bytes = await readFileBytes(meta.path, meta.size);
-        const book = parseMobi(bytes, meta.name);
-        const total = book.pages.length;
+        // v0.3.9: MOBI nạp lười — chỉ đọc header + bảng offsets + vùng
+        // text (vài MB) rồi chia trang; ảnh nhúng chỉ chuyển base64
+        // khi trang đó được render. Trước đây đọc CẢ file (412MB) +
+        // giải nén TẤT CẢ record + chuyển MỌI ảnh sang base64 TRƯỚC
+        // khi mở reader nên cả app đơ ở toast "Đang mở...". Số trang
+        // có thể lệch nhẹ so với bản cũ (ảnh không còn ăn vào ngân
+        // sách 6000 ký tự của trang — trang chứa nhiều chữ hơn, tổng
+        // số trang ít hơn; vị trí đọc đã lưu có thể lệch vài trang).
+        const { openMobiLazy } = await import("./lib/mobiLazy");
+        const book = await openMobiLazy(meta.path, meta.size, meta.name);
+        const total = book.total;
+        // loadPage của sách lười đã trả ReaderPage (HTML + ảnh của
+        // đúng trang đó đã chuyển base64, cache LRU 16 ảnh).
+        const load = async (i: number): Promise<ReaderPage> => book.loadPage(i);
+        const first = await Promise.all(
+          [startPage, startPage + 1, startPage + 2]
+            .filter((i) => i < total)
+            .map(load),
+        );
+        const initialPages: (ReaderPage | null)[] = Array(total).fill(null);
+        first.forEach((p, k) => {
+          initialPages[startPage + k] = p;
+        });
         setReader({
           total,
-          initialPages: book.pages,
-          loadPage: async (i) => book.pages[i],
+          initialPages,
+          loadPage: load,
           searchApi: {
-            search: async (query, onProgress) => {
-              const texts = book.pages.map((p) => ({ label: p.label, text: stripHtml(p.content) }));
-              return searchTextPages(texts, query, onProgress);
-            },
+            search: async (query, onProgress) => book.search(query, onProgress),
           },
-          thumbApi: { thumb: null, chapterTitles: book.pages.map((p) => p.label) },
+          thumbApi: { thumb: null, chapterTitles: book.chapterTitles },
         });
         setInitialSettings(await loadSettings(meta.id));
         setTitle(book.title);
