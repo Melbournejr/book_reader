@@ -229,6 +229,37 @@ fn list_folder(path: String) -> Result<Vec<FolderEntry>, String> {
 /// hàm này (mở file + `by_index` từng entry + sắp xếp) rồi mới giải nén
 /// trang đó; mở 1 file CBZ 300MB là 4 lần quét, mỗi lần lật trang lại
 /// quét thêm — trên ổ chậm là đơ cứng cả app ("not responding").
+/// Quét chỉ mục CBZ: chỉ tên file ảnh, sắp xếp tự nhiên (page1, page2,
+/// page10...). Không giải nén gì cả. Dùng chung cho lệnh `cbz_index`
+/// (có cache) và protocol `mio-page://` (không cache, mỗi lần gọi quét
+/// lại central directory — chỉ vài ms, chạy trên luồng nền của WebView).
+fn scan_cbz_entries(path: &str) -> Result<Vec<(usize, String)>, String> {
+    let f = File::open(path).map_err(|e| e.to_string())?;
+    let mut zip = ZipArchive::new(f).map_err(|e| e.to_string())?;
+    let mut entries: Vec<(usize, String)> = (0..zip.len())
+        .filter_map(|i| zip.by_index(i).ok().map(|f| (i, f.name().to_string())))
+        .filter(|(_, n)| {
+            let lower = n.to_lowercase();
+            IMAGE_EXTS.iter().any(|e| lower.ends_with(e))
+                && !lower.contains("__macosx")
+                && !lower.ends_with("comicinfo.xml")
+        })
+        .collect();
+    entries.sort_by(|a, b| natural_cmp(&a.1, &b.1));
+    Ok(entries)
+}
+
+/// Đọc ĐÚNG 1 entry trong ZIP ra bytes thô (không base64). Dùng chung
+/// cho lệnh `cbz_page` và protocol `mio-page://`.
+fn read_cbz_entry(path: &str, archive_idx: usize) -> Result<Vec<u8>, String> {
+    let f = File::open(path).map_err(|e| e.to_string())?;
+    let mut zip = ZipArchive::new(f).map_err(|e| e.to_string())?;
+    let mut entry = zip.by_index(archive_idx).map_err(|e| e.to_string())?;
+    let mut buf = Vec::new();
+    entry.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+    Ok(buf)
+}
+
 fn cbz_entries(state: &State<AppState>, path: &str) -> Result<Vec<(usize, String)>, String> {
     let m = std::fs::metadata(path).map_err(|e| e.to_string())?;
     let size = m.len();
@@ -246,18 +277,7 @@ fn cbz_entries(state: &State<AppState>, path: &str) -> Result<Vec<(usize, String
             }
         }
     }
-    let f = File::open(path).map_err(|e| e.to_string())?;
-    let mut zip = ZipArchive::new(f).map_err(|e| e.to_string())?;
-    let mut entries: Vec<(usize, String)> = (0..zip.len())
-        .filter_map(|i| zip.by_index(i).ok().map(|f| (i, f.name().to_string())))
-        .filter(|(_, n)| {
-            let lower = n.to_lowercase();
-            IMAGE_EXTS.iter().any(|e| lower.ends_with(e))
-                && !lower.contains("__macosx")
-                && !lower.ends_with("comicinfo.xml")
-        })
-        .collect();
-    entries.sort_by(|a, b| natural_cmp(&a.1, &b.1));
+    let entries = scan_cbz_entries(path)?;
     {
         let mut cache = state.cbz_cache.lock().map_err(|e| e.to_string())?;
         if cache.len() >= 8 {
@@ -334,11 +354,7 @@ fn cbz_page(state: State<AppState>, path: String, index: usize) -> Result<CbzPag
         .ok_or("Trang không tồn tại")?
         .clone();
     drop(entries);
-    let f = File::open(&path).map_err(|e| e.to_string())?;
-    let mut zip = ZipArchive::new(f).map_err(|e| e.to_string())?;
-    let mut entry = zip.by_index(archive_idx).map_err(|e| e.to_string())?;
-    let mut buf = Vec::new();
-    entry.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+    let buf = read_cbz_entry(&path, archive_idx)?;
     let mime = match ext_of(Path::new(&name)).as_str() {
         "png" => "image/png",
         "webp" => "image/webp",
@@ -498,10 +514,106 @@ fn write_file_bytes(path: String, b64: String) -> Result<u64, String> {
     Ok(bytes.len() as u64)
 }
 
+// ---------- custom protocol mio-page:// (v0.3.9) ----------
+//
+// Trang ảnh CBZ nạp qua URL thật thay vì base64 qua invoke: WebView
+// load ảnh như ảnh web bình thường (bất đồng bộ, cache theo URL, giải
+// mã ngoài luồng chính) — đúng mô hình blob URL của bản web mà Thiện
+// khen mượt. Không có base64 (+33%), không có chuỗi JSON vài MB qua
+// cầu invoke, không giải mã lại khi lật tới-lui cùng trang.
+//
+// URL: mio-page://cbz/<đường dẫn file đã encodeURIComponent>/<số trang>
+// Handler KHÔNG dùng AppState (không phụ thuộc API UriSchemeContext):
+// mỗi request quét lại central directory của ZIP (vài ms, trên luồng
+// nền của WebView) rồi đọc đúng 1 entry — cùng hàm scan_cbz_entries
+// và read_cbz_entry với lệnh cbz_index/cbz_page nên thứ tự trang
+// giống hệt nhau, không lệch nhãn/ảnh.
+// Nếu protocol lỗi (vd file đã đổi/xóa), frontend dùng fallback base64
+// qua lệnh cbz_page (xem ReaderPage.fallback) — trang vẫn hiện.
+
+/// Giải mã percent-encoding (đường dẫn đã encodeURIComponent ở frontend).
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Phục vụ 1 trang ảnh CBZ cho custom protocol. Trả 404 khi sách hoặc
+/// trang không còn tồn tại (frontend sẽ dùng fallback base64).
+fn page_response(uri: &http::Uri) -> http::Response<Vec<u8>> {
+    let err = |status: http::StatusCode, msg: &str| {
+        http::Response::builder()
+            .status(status)
+            .header("content-type", "text/plain; charset=utf-8")
+            .body(msg.as_bytes().to_vec())
+            .unwrap()
+    };
+    // mio-page://cbz/<encoded-path>/<index> -> path() = "/<encoded>/<index>"
+    let path = uri.path();
+    let Some(rest) = path.strip_prefix('/') else {
+        return err(http::StatusCode::BAD_REQUEST, "bad page url");
+    };
+    let Some(after_kind) = rest.strip_prefix("cbz/") else {
+        return err(http::StatusCode::NOT_FOUND, "unknown page source");
+    };
+    let Some(slash) = after_kind.rfind('/') else {
+        return err(http::StatusCode::BAD_REQUEST, "bad page url");
+    };
+    let (enc_path, idx_str) = (&after_kind[..slash], &after_kind[slash + 1..]);
+    let Ok(index) = idx_str.parse::<usize>() else {
+        return err(http::StatusCode::BAD_REQUEST, "bad page index");
+    };
+    let file_path = percent_decode(enc_path);
+    let entries = match scan_cbz_entries(&file_path) {
+        Ok(e) => e,
+        Err(_) => return err(http::StatusCode::NOT_FOUND, "book not found"),
+    };
+    let Some((archive_idx, name)) = entries.get(index) else {
+        return err(http::StatusCode::NOT_FOUND, "page not found");
+    };
+    let (archive_idx, name) = (*archive_idx, name.clone());
+    let mime = match ext_of(Path::new(&name)).as_str() {
+        "png" => "image/png",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "avif" => "image/avif",
+        _ => "image/jpeg",
+    };
+    let bytes = match read_cbz_entry(&file_path, archive_idx) {
+        Ok(b) => b,
+        Err(_) => return err(http::StatusCode::NOT_FOUND, "page not found"),
+    };
+    http::Response::builder()
+        .header("content-type", mime)
+        // Ảnh trang được cache theo URL: lật tới-lui không tải lại.
+        .header("cache-control", "public, max-age=86400")
+        // Cho fetch() (vd thu nhỏ thumbnail) đọc được từ origin tauri://.
+        .header("access-control-allow-origin", "*")
+        .body(bytes)
+        .unwrap()
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        // v0.3.9: trang ảnh CBZ nạp qua URL thật (mio-page://) thay vì
+        // base64 qua invoke — xem page_response ở trên.
+        .register_uri_scheme_protocol("mio-page", |_ctx, request| {
+            page_response(request.uri())
+        })
         .setup(|app| {
             let dir = app
                 .path()
