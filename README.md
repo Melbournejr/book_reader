@@ -196,6 +196,143 @@ không có đọc manga phải → trái. Bản này sửa cả 3 + làm lại g
   không, lật còn ngược không (nhất là truyện ảnh CBZ), manga lật đúng
   chiều + đúng trang chưa, menu mở/đóng có mượt không.
 
+### v0.3.9 — MOBI nạp lười + lá lật hiện thật + lật phản hồi ngay: theo mô hình trình xem video (28/11/2026)
+Thiện test v0.3.8 (sidebar đã ghi v0.3.8): (a) mở Conde koma 1.mobi
+(412MB) thì cả app đơ, kẹt ở toast "Đang mở Conde koma 1.mobi...";
+(b) hiệu ứng lật trang "chưa hề thay đổi, vẫn như cũ" — kèm 2 video:
+video 1 (MOBI sách chữ, Trang 4449/5870) cùng nhãn 4449 hiện 2 đoạn
+truyện khác nhau; video 2 (CBZ I Am A Hero, 47s) trang truyện bên phải
+biến thành ĐEN ĐẶC ~7 giây trong khi bìa sau vẫn hiện, rồi nhảy tới
+trang 166-168, nhãn lúc đó đọc "Trang 1 / 605 · RTL" trong khi ảnh
+đang là spread cuối. Hắn lật bằng PHÍM (mũi tên) và CHUỘT (chạm nhẹ),
+KHÔNG dùng slider; và app nói chung "đơ lắm". Hắn đặt chuẩn: trình xem
+video tua mượt với file vài chục GB — app đọc sách phải mượt như vậy,
+không được đưa bản nửa vời.
+
+**Chẩn đoán (đọc code thật, file:dòng):**
+
+1. **Lá lật TÀNG HÌNH — gốc lỗi 100% chắc chắn.** `Reader.tsx`
+   mount `CurlLeaf` với `point={curl.grab}` — điểm giữ trùng điểm nắm
+   nên `foldGeometry` trả null (len < 2), `CurlLeaf` trả null, không có
+   DOM nào cho imperative handle viết vào — lá không bao giờ hiện trong
+   cả cú lật, cho MỌI đường lật (phím/chạm/nút/kéo). Bản web mount ở
+   `point: path(easeOutQuart(0.03))` nên không gặp lỗi này; bản desktop
+   port v0.3.7 đã làm rơi trường `point` khỏi `CurlState` (chỉ còn
+   `grab`/`mirror`), dù comment trong `startFlip` vẫn ghi "mount lá hơi
+   chếch vào trong cú lật". Không phải do `flipOn` (hardcode `true`),
+   không phải CSS cắt, không phải tween không chạy — tween chạy đủ 900ms
+   nhưng viết vào DOM trống.
+2. **"Đơ lắm" khi lật — `startFlip` chờ decode xong mới mount lá.**
+   v0.3.8 `await ensure(4 trang)` + `await decodeImages(4 trang)` rồi
+   mới `setCurl`: mỗi lần bấm phím/chạm đều đứng hình ~0.2–1s (base64
+   vài MB/trang qua JSON invoke, giải mã trên luồng chính) rồi trang
+   nhảy tức thì (lá lại tàng hình) — cảm giác đơ rồi nhảy. Cùng nhịp
+   chờ này có ở `beginDragFlip` và `settleDrag` (thả tay xong vẫn đứng
+   hình một nhịp).
+3. **Trang đen 7 giây (video 2) — trang lỗi thì kẹt, không thử lại.**
+   `.page-img { background: #111 }`: `<img>` chưa decode xong thì slot
+   đen. `ensure` nuốt lỗi nạp (không thử lại), `decodeImages` không có
+   timeout, và không có gì kích hoạt nạp lại khi `cur` không đổi — trang
+   lỗi kẹt đen cho tới khi đổi spread. Cộng thêm: `jumpTo`/`commitSlider`
+   không gọi `cancelFlip()` — nhảy giữa lúc lật để lại `curl.base` cũ
+   hiển thị trong khi `cur` đã đổi (đúng hiện tượng nhãn "Trang 1" mà
+   ảnh là spread cuối ở t=7).
+4. **Video 1 "lệch nhãn" — KHÔNG phải lỗi chia trang.** `splitPages`
+   là hàm thuần túy (cùng HTML → cùng trang), và frame giữa có đường
+   ranh thẳng chính là gáy của spread 2 trang bình thường (4449, 4450)
+   — máy quay lia nên khung hình cắt khác nhau. Lỗi thật trong video 1:
+   (a) không thấy lá cong (lỗi 1), (b) chạm nhẹ vào trang chữ KHÔNG lật
+   được (`onPointerDown` return sớm với slot chữ, không ghi
+   `pendingDragRef` — chỉ phím và nút ‹ › lật được).
+5. **MOBI lag — đã xác định từ trước, không cần điều tra lại.**
+   `App.tsx` đọc CẢ file 412MB (`readFileBytes`) + `parseMobi` giải nén
+   TẤT CẢ record + build TẤT CẢ trang + chuyển MỌI ảnh nhúng sang base64
+   TRƯỚC khi mở reader (`initialPages: book.pages` — mảng đầy).
+6. **Đường nạp trang cũ là nghi phạm cấu trúc gây đơ.** Rust `cbz_page`
+   trả base64 qua invoke → `<img src="data:...">` vài MB: chuỗi base64
+   khổng lồ đi qua JSON invoke, trình duyệt giải mã trên luồng chính.
+   Đo trên JPEG thật (fixture CBZ 200 trang): 4 trang raw 4,144,616
+   byte → base64 data URL 5,526,252 byte (x1.333, thừa 1,381,636
+   byte/lần lật). Bản web dùng File API + blob URL nên mượt — desktop
+   phải có đường tương đương.
+
+**Sửa (theo mô hình trình xem video: chỉ đọc index rồi seek, không bao
+giờ chặn UI chờ decode, chỉ giữ buffer nhỏ vài trang):**
+
+1. **Lá hiện thật:** `CurlState` thêm `point: Pt`; `startFlip` mount
+   với `point: path(easeOutQuart(0.03))`, `beginDragFlip` mount với
+   `point` = điểm tay hiện tại đã kẹp theo cung lật; JSX truyền
+   `point={curl.point}` (trước đây `point={curl.grab}`). Thêm
+   `ensureFoldPoint` (`src/lib/curl.ts`) + dùng trong `CurlLeaf.tsx`
+   (render/`update`/`applyPoint`) làm lưới an toàn: điểm suy biến được
+   đẩy ra vài px tới khi hình học hợp lệ, lá không bao giờ biến mất vì
+   một tư thế suy biến.
+2. **Lật phản hồi ngay:** `startFlip`/`beginDragFlip`/`settleDrag` mount
+   lá + chạy tween NGAY LẬP TỨC, không await gì trước đó; `ensure` +
+   `decodeImages` chạy NỀN (fire-and-forget). Effect nạp trước thường
+   đã có sẵn trang đích; nếu chưa có, mặt sau lá hiện placeholder "Đang
+   tải trang…" rồi tự đổi thành trang thật khi nạp xong (ensure tăng
+   cacheVersion → render lại). Nhãn vẫn chỉ đổi ở `finishFlip` (cuối
+   tween) — không lệch nhãn/ảnh. Bỏ `flipSeqRef` (không còn khoảng chờ
+   async nào cần vô hiệu hóa).
+3. **Trang ảnh qua custom protocol `mio-page://`** (thay base64 qua
+   invoke): Rust `main.rs` thêm `scan_cbz_entries` /
+   `read_cbz_entry` (dùng chung cho lệnh `cbz_index`/`cbz_page` và
+   protocol — cùng thứ tự trang), `page_response` (CBZ only, MIME theo
+   đuôi file, `cache-control: public, max-age=86400`,
+   `access-control-allow-origin: *`, 404 khi sách/trang không còn),
+   đăng ký `.register_uri_scheme_protocol("mio-page", ...)`; thêm dep
+   `http = "1"` vào `Cargo.toml`; CSP thêm `mio-page:` vào `img-src`
+   và `connect-src`. Ảnh nạp như ảnh web bình thường (bất đồng bộ, cache
+   theo URL, giải mã ngoài luồng chính); lật tới-lui không giải mã lại.
+   An toàn: `ReaderPage.fallback` + `<img onError>` trong `renderFace`
+   thử 1 lần base64 qua `cbz_page` khi protocol lỗi (vd file đã đổi/xóa
+   sau khi mở) — trang vẫn hiện, chỉ chậm hơn. Thumbnail lưới trang vẫn
+   dùng base64 riêng (downscale qua fetch).
+4. **MOBI nạp lười** (`src/lib/mobiLazy.ts` mới, `src/lib/mobi.ts`
+   refactor + tối ưu `palmdocDecompress` bằng bộ đệm tăng trưởng):
+   mở chỉ đọc 78 byte đầu → bảng offsets → record 0 (header) → VÙNG
+   text records (liên tục, vài MB) → giải nén → tách trang; ảnh nhúng
+   (`<img recindex>`) chỉ chuyển base64 khi trang đó được render
+   (`loadPage`, cache LRU 16 ảnh). Đo thật trên fixture MOBI tổng hợp
+   399.8MB (text 26.9MB, 3,467 trang, 8,576 record): **mở trong 660ms,
+   chỉ đọc 26,972,083 byte (6.4% cỡ file)** — so với bản cũ đọc cả
+   419MB. Tìm kiếm vẫn quét toàn bộ text (đã có sẵn trong RAM) nên
+   không chậm hơn. **Đổi hành vi (ghi rõ):** số trang có thể lệch nhẹ so
+   với bản cũ vì ảnh không còn ăn vào ngân sách 6000 ký tự của trang
+   (placeholder ~20 ký tự thay cho base64 hàng MB) — trang chứa nhiều
+   chữ hơn, tổng số trang ít hơn, vị trí đọc đã lưu có thể lệch vài
+   trang khi mở lại sách cũ.
+5. **Hết trang đen kẹt:** effect thử lại trang lỗi sau 1.5s, tối đa 2
+   lần mỗi spread (reset khi đổi spread); `jumpTo`/`commitSlider` gọi
+   `cancelFlip()` trước (hủy cả tween đang chạy — không còn lá cũ kẹt
+   hiển thị sai spread) và chờ nạp tối đa 8s (`withTimeout`) rồi nhảy
+   tiếp với placeholder thay vì treo mãi.
+6. **Chạm nhẹ lật được trên sách chữ:** `onPointerDown` ghi nhận cả
+   slot chữ (`PendingDrag.isImage`); kéo trên trang chữ vẫn là bôi đen
+   chữ (không kéo lật, không capture con trỏ), chạm nhẹ <8px thì lật.
+
+**KHÔNG đổi:** hình học curl (`curl.ts` ngoài `ensureFoldPoint`,
+`CurlLeaf.tsx` ngoài lưới an toàn), pairing RTL (vẫn chờ Thiện đồng
+ý), mô hình spread, số liệu flip (900ms easeOutQuart, settle
+170–560ms, ngưỡng commit), fullscreen `immersive`, thư viện/cây thư
+mục/Telegram/OPDS/stats, PDF (không ai báo lag), CBR (vẫn đọc cả file
+vào RAM — giới hạn cũ, chưa ai báo lag với CBR).
+
+**Chưa kiểm được bằng mắt** (không có WebView trên máy build): lá cong
+có hiện đúng như video mẫu không, lật có mượt thật trên máy Thiện
+không (đo bằng test: mount lá <20ms, mở MOBI 660ms — nhưng cảm nhận
+trên WebView2 thật mới là cửa cuối), Rust có biên dịch được không
+(không có cargo/rustc trên VM — **GitHub Actions là cửa kiểm cuối cho
+Rust**: nếu protocol sai, app vẫn chạy nhờ fallback base64, chỉ chậm
+hơn). Test số: 101 (v030) + 13 (v034) + 41 (v037) + 44 (v038) + 688 mới
+(v039: hình học mount lá LTR/RTL × tới/lui + spread cuối, MOBI lười
+trên fixture 400MB thật, mô phỏng 200 lần lật nhanh tới-lui + nhảy giữa
+chừng, URL protocol, palmdocDecompress, đo base64 vs protocol) — tất
+cả pass. Fixture + generator lưu ở
+`~/workspace/goals/pc-book-reading-software/hidden_files/` (mobi/cbz
+tổng hợp + script sinh + file test v039).
+
 ### v0.3.8 — hết lệch nhãn/ảnh khi lật nhanh: port cơ chế chống lệch của bản web (27/11/2026)
 Thiện gửi video test v0.3.7 (cài sạch, sidebar đã ghi v0.3.7): nhãn
 "Trang 72–73" rồi "Trang 70–71" nhưng 2 trang hiện ra giống hệt nhau
