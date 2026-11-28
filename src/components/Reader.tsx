@@ -2059,11 +2059,12 @@ export default function Reader({
                     {renderFace(right, false, rightIndex)}
                   </div>
                 ))}
-              {/* Lá lật cong thật (v0.3.7, port từ bản web): chỉ mount
-                  khi đang lật; tọa độ spread (layout px), cha .spread
-                  scale lên theo. Mặt trước = trang đang đọc, mặt sau =
-                  trang đích (đã pre-mirror trong CurlLeaf nên không bị
-                  ngược — xem v0.2.0). */}
+              {/* Lá lật cuộn trụ thật (v0.3.11, thay mô hình gấp thẳng
+                  v0.3.7–v0.3.10): chỉ mount khi đang lật; tọa độ
+                  spread (layout px), cha .spread scale lên theo.
+                  Mặt trước = trang đang đọc, mặt sau = trang đích
+                  (đặt đúng vị trí vật chất qua contentBackMatrix
+                  trong CurlLeaf, không pre-mirror scaleX nữa). */}
               {curl && (
                 <CurlLeaf
                   ref={leafRef}
@@ -2073,6 +2074,7 @@ export default function Reader({
                   cellW={curl.cellW}
                   grab={curl.grab}
                   point={curl.point}
+                  mirror={curl.mirror}
                   frontBg={pageTheme === "paper" ? "#f1e5c8" : pageTheme === "night" ? "#1c1a17" : "#fdfcf8"}
                   backBg={pageTheme === "paper" ? "#f1e5c8" : pageTheme === "night" ? "#1c1a17" : "#fdfcf8"}
                   dark={isComic}

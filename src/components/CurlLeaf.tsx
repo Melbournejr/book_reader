@@ -1,357 +1,433 @@
+/**
+ * CurlLeaf — lá trang đang lật, mô hình CUỘN TRỤ (cylinder curl).
+ *
+ * v0.3.11: thay mô hình gấp thẳng cũ (foldGeometry: một đường gấp
+ * thẳng duy nhất, mặt sau phản xạ qua nếp — nhìn gần như tấm bìa
+ * cứng gập, nếp sắc, mặt sau xéo) bằng mô hình cuộn trụ thật:
+ *
+ *   - Trang quấn quanh một hình trụ bán kính R lăn ngang trang.
+ *     Vùng uốn là một dải cong có bán kính hữu hạn (Rπ), không phải
+ *     đường gấp sắc: dải cong chia thành N lát (strip), mỗi lát là
+ *     một mặt phẳng cứng xoay một góc nhỏ (≤ 15°) — góc uốn tăng
+ *     dần dọc dải, không có bước nhảy góc nào lớn.
+ *   - Mỗi lát là một phép QUAY cứng (ma trận 3D trực giao, định
+ *     thức +1): không shear, không xéo — một hình vuông trên mặt
+ *     sau vẫn là hình vuông sau khi lật.
+ *   - Góc giấy bám đúng điểm tay nhờ luật bóc (arc-length): điểm
+ *     tiếp tuyến F tính từ độ dài cung, không phải đường trung trực.
+ *   - Bán kính R thu nhỏ mượt về 0 ở 15% cuối cú lật để trang đáp
+ *     phẳng đúng vị trí, không bị "rơi" 2R.
+ *
+ * Hình học sống trong src/lib/curlGeometry.ts (curlGeometry); file
+ * này chỉ là lớp render: N lát div (mỗi lát có 2 mặt, trước/sau),
+ * bóng đổ, vệt bóng nếp gấp, vệt sáng gờ cuộn. Mọi style đổi theo
+ * khung hình được ghi thẳng vào DOM qua imperative handle (không
+ * re-render React giữa cú lật) — giữ nguyên cơ chế từ v0.3.7.
+ *
+ * Props giữ nguyên như cũ + thêm `mirror` (điểm đáp) để tính tiến
+ * độ / bán kính; thiếu mirror thì ước lượng quãng lật = 2 × cellW.
+ */
+
 import {
   forwardRef,
   useImperativeHandle,
   useLayoutEffect,
   useRef,
-  type CSSProperties,
-  type ReactNode,
-  type RefObject,
 } from "react";
-import { foldGeometry, ensureFoldPoint, type FoldGeometry, type Pt } from "../lib/curl";
+import type { Pt } from "../lib/curl";
+import { ensureFoldPoint } from "../lib/curl";
+import {
+  curlGeometry,
+  CURL_STRIP_COUNT,
+} from "../lib/curlGeometry";
 
-/**
- * Lá lật cong thật — port trực tiếp từ bản web phan-mem-doc-sach
- * (client/src/CurlLeaf.tsx), bản demo mà Thiện từng khen.
- *
- * Bản desktop trước đây (tới v0.3.6) chỉ là một tấm phẳng rotateY
- * quanh gáy: cứng như bìa, không cong, nếp gấp + bóng đổ là 2 dải mờ
- * tĩnh dán ở mép lá — đó là lý do hiệu ứng lật "cực kém" dù thời gian
- * (900ms) và easing giống hệt bản web. Component này vẽ 1 trang đang
- * lật thành nếp gấp cong thật (reflection fold): xem src/lib/curl.ts.
- *
- * Imperative handle: trong lúc lật, reader gọi `update(point)` mỗi
- * animation frame thay vì đẩy point qua React state — update qua state
- * mỗi khung hình sẽ render lại cả reader (chữ/ảnh tính lại layout)
- * làm lật bị giật, nhất là lật bằng phím. `update` chỉ viết lại style
- * (clip-path, transform, opacity) trên chính các node của lá.
- */
 export interface CurlLeafHandle {
   update: (point: Pt) => void;
 }
 
-interface CurlLeafProps {
-  /** Spread width in px (the coordinate space grab/point live in). */
-  width: number;
-  /** Page height in px. */
-  height: number;
-  /** Left edge of the turning page's cell, in spread coords. */
-  cellX: number;
-  /** Page width in px. */
-  cellW: number;
-  grab: Pt;
-  point: Pt;
-  front: ReactNode;
-  back: ReactNode;
-  /** Face background, painted under the content inside each face. */
-  frontBg?: string;
-  backBg?: string;
-  /** Dark-room variant (comic reader): softer white ridge, deeper shade. */
+export interface CurlLeafProps {
+  width: number; // chiều rộng spread (px)
+  height: number; // chiều cao spread (px)
+  cellX: number; // x của trang đang lật trong spread
+  cellW: number; // chiều rộng trang đang lật
+  grab: Pt; // điểm nắm lúc nghỉ (góc trang)
+  point: Pt; // điểm cầm lúc mount (điểm bắt đầu tween / tay)
+  mirror?: Pt; // điểm đáp (phản chiếu grab qua gáy)
+  front: React.ReactNode;
+  back: React.ReactNode;
+  frontBg: string;
+  backBg: string;
   dark?: boolean;
 }
 
-/**
- * Renders one turning page as a true curl (reflection fold), given the
- * grab point and the current held-point position. The readers own the
- * flip state; React renders the leaf once per flip with the launch
- * point, and the animation then drives it through the ref handle.
- *
- * Layers, back to front:
- * 1. a soft blurred shadow in the shape of the folded-over part, offset
- *    away from the fold — the shadow the lifted paper casts on the page
- *    revealed underneath; it deepens as the curl grows;
- * 2. a dark gradient strip hugging the fold on the revealed page;
- * 3. the front face: page content clipped to the not-yet-folded region,
- *    with a bend shade that darkens toward the crease;
- * 4. the back face: page content reflected across the fold line,
- *    clipped to the reflected polygon, shaded like the underside of a
- *    bending sheet;
- * 5. a specular ridge: a bright highlight strip centred on the fold
- *    line — the sheen along the crease that sells the paper.
- */
+/** Số lát tối đa: 1 phẳng + 12 uốn + 1 đã lật = 14. */
+export const CURL_LEAF_MAX_STRIPS = CURL_STRIP_COUNT + 2;
+
+const fmt = (n: number) => (Number.isFinite(n) ? n.toFixed(2) : "0");
+
 export const CurlLeaf = forwardRef<CurlLeafHandle, CurlLeafProps>(
   function CurlLeaf(
-    { width, height, cellX, cellW, grab, point, front, back, frontBg, backBg, dark = false },
+    {
+      width,
+      height,
+      cellX,
+      cellW,
+      grab,
+      point,
+      mirror,
+      front,
+      back,
+      frontBg,
+      backBg,
+      dark = false,
+    },
     ref,
   ) {
     const rootRef = useRef<HTMLDivElement | null>(null);
-    const shadowOuterRef = useRef<HTMLDivElement | null>(null);
-    const shadowInnerRef = useRef<HTMLDivElement | null>(null);
+    const stripRefs = useRef<Array<HTMLDivElement | null>>([]);
+    const frontFaceRefs = useRef<Array<HTMLDivElement | null>>([]);
+    const backFaceRefs = useRef<Array<HTMLDivElement | null>>([]);
+    const frontContentRefs = useRef<Array<HTMLDivElement | null>>([]);
+    const backContentRefs = useRef<Array<HTMLDivElement | null>>([]);
+    const shadowRef = useRef<HTMLDivElement | null>(null);
     const foldShadowRef = useRef<HTMLDivElement | null>(null);
-    const frontClipRef = useRef<HTMLDivElement | null>(null);
-    const frontShadeRef = useRef<HTMLDivElement | null>(null);
-    const backClipRef = useRef<HTMLDivElement | null>(null);
-    const backInnerRef = useRef<HTMLDivElement | null>(null);
-    const backShadeRef = useRef<HTMLDivElement | null>(null);
     const ridgeRef = useRef<HTMLDivElement | null>(null);
+    const liveRef = useRef({ grab, point });
 
     const cell = { x: cellX, y: 0, w: cellW, h: height };
     const arena = { x: cellX - cellW, y: 0, w: cellW * 3, h: height };
 
     /**
-     * The last point actually painted. A parent re-render mid-flip
-     * (fullscreen chrome auto-hiding, a progress save landing) re-runs
-     * this component with the stale launch point in props; the layout
-     * effect below re-applies `live` after every render so the sheet
-     * never snaps back to the launch pose.
+     * Điểm giữ lúc mount / lần render lại giữa cú lật. Một lần
+     * re-render giữa chừng (chrome full màn tự ẩn/hiện, progress
+     * save) chạy lại component với điểm mount cũ trong props; giữ
+     * điểm đã vẽ (live) để không bật về tư thế ban đầu — giữ cơ chế
+     * từ bản gấp thẳng cũ.
      */
-    const liveRef = useRef<{ grab: Pt; point: Pt }>({ grab, point });
     if (liveRef.current.grab !== grab) {
       liveRef.current = { grab, point };
     }
 
-    const poly = (pts: Pt[]) =>
-      `polygon(${pts.map((p) => `${p.x.toFixed(1)}px ${p.y.toFixed(1)}px`).join(", ")})`;
-
-    /** Writes one fold-following strip's dynamic style for `geo`. */
-    const setStrip = (
-      elRef: RefObject<HTMLDivElement | null>,
-      geo: FoldGeometry,
-      offsetN: number,
-      opacity: number,
-    ) => {
-      const el = elRef.current;
-      if (!el) return;
-      const segLen =
-        Math.hypot(geo.foldB.x - geo.foldA.x, geo.foldB.y - geo.foldA.y) + 6;
-      el.style.left = `${(geo.foldMid.x + geo.normal.x * offsetN).toFixed(1)}px`;
-      el.style.top = `${(geo.foldMid.y + geo.normal.y * offsetN).toFixed(1)}px`;
-      el.style.height = `${segLen.toFixed(1)}px`;
-      el.style.transform = `translate(-50%, -50%) rotate(${geo.stripAngleDeg}deg)`;
-      el.style.opacity = `${opacity}`;
-    };
-
-    /** Paints the fold for the held point `p` — styles only, no React.
-     *  v0.3.9: điểm giữ được nudge qua `ensureFoldPoint` trước khi tính
-     *  hình học — tư thế suy biến (điểm giữ trùng điểm nắm) không còn
-     *  làm lá biến mất: trước đây `foldGeometry` trả null thì lá bị
-     *  `visibility: hidden` và không bao giờ hiện lại trong cú lật.
-     *  Nếu hình học vẫn null (cell suy biến) thì giữ nguyên tư thế đã
-     *  vẽ thay vì giấu lá. */
+    /** Viết toàn bộ tư thế (grab, point) vào DOM. */
     const applyPoint = (p: Pt) => {
       const root = rootRef.current;
       if (!root) return;
       const pt = ensureFoldPoint(liveRef.current.grab, p, cell, arena);
-      const geo = foldGeometry(liveRef.current.grab, pt, cell, arena);
+      const geo = curlGeometry(liveRef.current.grab, pt, cell, mirror ?? null);
       if (!geo) return;
-      root.style.visibility = "visible";
-      const d = geo.depth;
-      if (shadowOuterRef.current) {
-        shadowOuterRef.current.style.opacity = `${0.16 + 0.4 * d}`;
+      root.style.display = "";
+      // --- các lát ---
+      for (let i = 0; i < CURL_LEAF_MAX_STRIPS; i++) {
+        const el = stripRefs.current[i];
+        if (!el) continue;
+        const strip = geo.strips[i];
+        if (!strip) {
+          el.style.display = "none";
+          continue;
+        }
+        el.style.display = "";
+        el.style.width = `${strip.w}px`;
+        el.style.height = `${strip.h}px`;
+        el.style.transform = strip.matrix3d;
+        el.style.clipPath =
+          strip.clip.length >= 3
+            ? `polygon(${strip.clip
+                .map((pt) => `${fmt(pt.x)}px ${fmt(pt.y)}px`)
+                .join(", ")})`
+            : "none";
+        const frontFace = frontFaceRefs.current[i];
+        const backFace = backFaceRefs.current[i];
+        const frontContent = frontContentRefs.current[i];
+        const backContent = backContentRefs.current[i];
+        if (frontFace) {
+          frontFace.style.display = strip.faces === "back" ? "none" : "";
+        }
+        if (backFace) {
+          backFace.style.display = strip.faces === "front" ? "none" : "";
+        }
+        if (frontContent) {
+          frontContent.style.transform = strip.contentMatrix;
+        }
+        if (backContent) {
+          backContent.style.transform = strip.contentBackMatrix;
+        }
       }
-      if (shadowInnerRef.current) {
-        shadowInnerRef.current.style.clipPath = poly(geo.back);
-        shadowInnerRef.current.style.transform =
-          `translate(${(-geo.normal.x * 13).toFixed(1)}px, ${(-geo.normal.y * 13 + 6).toFixed(1)}px)`;
+      // --- bóng đổ của phần đã nhấc lên (trên trang gốc) ---
+      const shadow = shadowRef.current;
+      if (shadow) {
+        shadow.style.clipPath =
+          geo.shadowPoly.length >= 3
+            ? `polygon(${geo.shadowPoly
+                .map((pt) => `${fmt(pt.x)}px ${fmt(pt.y)}px`)
+                .join(", ")})`
+            : "none";
+        shadow.style.transform = `translate(${fmt(
+          geo.shadowOffset.x,
+        )}px, ${fmt(geo.shadowOffset.y)}px)`;
+        shadow.style.opacity = String(geo.shadowOpacity);
       }
-      setStrip(foldShadowRef, geo, -34, 0.35 + 0.65 * d);
-      if (frontClipRef.current) {
-        frontClipRef.current.style.display = geo.near.length >= 3 ? "" : "none";
-        frontClipRef.current.style.clipPath = poly(geo.near);
+      // --- vệt bóng nếp gấp: dải dọc đường tiếp tuyến ---
+      const stripH = geo.strips[0]?.h ?? height;
+      const foldShadow = foldShadowRef.current;
+      if (foldShadow) {
+        const R = geo.radius;
+        if (R > 1) {
+          const { x: Fx, y: Fy } = geo.tangent;
+          const { x: ux, y: uy } = geo.tangentDir;
+          const { x: ox, y: oy } = geo.out;
+          foldShadow.style.display = "";
+          foldShadow.style.width = `${stripH}px`;
+          foldShadow.style.height = `${2 * R}px`;
+          foldShadow.style.transform = `matrix(${fmt(ux)}, ${fmt(
+            uy,
+          )}, ${fmt(ox)}, ${fmt(oy)}, ${fmt(
+            Fx - (stripH / 2) * ux - R * ox,
+          )}, ${fmt(Fy - (stripH / 2) * uy - R * oy)})`;
+          foldShadow.style.transformOrigin = "0 0";
+          foldShadow.style.opacity = String(
+            Math.min(1, geo.progress * 2) * 0.85,
+          );
+        } else {
+          foldShadow.style.display = "none";
+        }
       }
-      setStrip(frontShadeRef, geo, 0, 0.4 + 0.6 * d);
-      if (backClipRef.current) {
-        backClipRef.current.style.clipPath = poly(geo.back);
+      // --- vệt sáng gờ cuộn: dải dọc đường gờ (s = Rπ/2) ---
+      const ridge = ridgeRef.current;
+      if (ridge) {
+        const R = geo.radius;
+        if (R > 1 && geo.progress > 0.02 && geo.progress < 0.98) {
+          const cx = geo.tangent.x + ((R * Math.PI) / 2) * geo.out.x;
+          const cy = geo.tangent.y + ((R * Math.PI) / 2) * geo.out.y;
+          const { x: ux, y: uy } = geo.tangentDir;
+          const { x: ox, y: oy } = geo.out;
+          ridge.style.display = "";
+          ridge.style.width = `${stripH}px`;
+          ridge.style.height = "6px";
+          ridge.style.transform = `matrix(${fmt(ux)}, ${fmt(
+            uy,
+          )}, ${fmt(ox)}, ${fmt(oy)}, ${fmt(
+            cx - (stripH / 2) * ux - 3 * ox,
+          )}, ${fmt(cy - (stripH / 2) * uy - 3 * oy)})`;
+          ridge.style.transformOrigin = "0 0";
+          ridge.style.opacity = String(
+            0.5 * Math.sin(Math.PI * geo.progress),
+          );
+        } else {
+          ridge.style.display = "none";
+        }
       }
-      if (backInnerRef.current) {
-        const [a, b, c, dd, e, f] = geo.matrix;
-        backInnerRef.current.style.transform =
-          `matrix(${a}, ${b}, ${c}, ${dd}, ${e}, ${f})`;
-      }
-      setStrip(backShadeRef, geo, 0, 0.4 + 0.6 * d);
-      setStrip(ridgeRef, geo, 0, 0.3 + 0.7 * d);
     };
 
     useImperativeHandle(ref, () => ({
       update: (p: Pt) => {
-        // Lưu điểm đã nudge để lần render lại giữa lúc lật (vd chrome
-        // full màn tự ẩn/hiện) vẽ lại đúng tư thế đang cầm, không bật
-        // về tư thế suy biến ban đầu.
         const pt = ensureFoldPoint(liveRef.current.grab, p, cell, arena);
         liveRef.current = { grab: liveRef.current.grab, point: pt };
         applyPoint(pt);
       },
     }));
 
+    // Vẽ tư thế mount ngay trước khi paint (tránh chớp 1 frame);
+    // chạy lại sau mỗi render để re-render giữa cú lật không bật
+    // lá về tư thế mount ban đầu.
     useLayoutEffect(() => {
       applyPoint(liveRef.current.point);
     });
 
     // v0.3.9: nudge điểm mount trước khi tính hình học — trước đây
-    // mount với point == grab nên `foldGeometry` trả null, component
-    // trả null, không có DOM nào cho imperative handle viết vào, lá
-    // tàng hình suốt cả cú lật (v0.3.7–v0.3.8). Giờ lá luôn mount được
-    // với hình học hợp lệ (xem ensureFoldPoint trong lib/curl.ts).
+    // mount với point == grab nên hình học trả null, component trả
+    // null, không có DOM nào cho imperative handle viết vào, lá tàng
+    // hình suốt cả cú lật (v0.3.7–v0.3.8). Giờ lá luôn mount được với
+    // hình học hợp lệ (xem ensureFoldPoint trong lib/curl.ts).
     const safePoint = ensureFoldPoint(grab, point, cell, arena);
-    const geo = foldGeometry(grab, safePoint, cell, arena);
+    const geo = curlGeometry(grab, safePoint, cell, mirror ?? null);
     if (!geo) return null;
-    const shadeRgb = dark ? "0, 0, 0" : "62, 38, 12";
-    const layer: CSSProperties = {
-      position: "absolute",
-      left: 0,
-      top: 0,
-      width,
-      height,
-      pointerEvents: "none",
-    };
-    /** Initial style for one fold strip; `applyPoint` rewrites it per frame. */
-    const stripInit = (
-      stripW: number,
-      background: string,
-      offsetN: number,
-      z: number,
-      opacity: number,
-    ): CSSProperties => {
-      const segLen =
-        Math.hypot(geo.foldB.x - geo.foldA.x, geo.foldB.y - geo.foldA.y) + 6;
-      return {
-        position: "absolute",
-        left: geo.foldMid.x + geo.normal.x * offsetN,
-        top: geo.foldMid.y + geo.normal.y * offsetN,
-        width: stripW,
-        height: segLen,
-        transform: `translate(-50%, -50%) rotate(${geo.stripAngleDeg}deg)`,
-        background,
-        opacity,
-        pointerEvents: "none",
-        zIndex: z,
-        willChange: "transform",
-      };
-    };
-    const [a, b, c, d, e, f] = geo.matrix;
+
+    const stripH = geo.strips[0]?.h ?? height;
+
     return (
-      <div ref={rootRef} style={{ ...layer, zIndex: 30 }}>
-        {/* 1 · cast shadow of the lifted part, on the page underneath */}
+      <div
+        ref={rootRef}
+        aria-hidden
+        style={{
+          position: "absolute",
+          left: 0,
+          top: 0,
+          width,
+          height,
+          zIndex: 30,
+          pointerEvents: "none",
+          // Một perspective chung cho mọi lát (không đặt per-strip)
+          // để các lát cùng chia một không gian 3D.
+          perspective: "1600px",
+          transformStyle: "preserve-3d",
+        }}
+      >
+        {/* Bóng đổ của phần đã nhấc lên, nằm trên trang gốc. */}
         <div
-          ref={shadowOuterRef}
-          aria-hidden
+          ref={shadowRef}
           style={{
-            ...layer,
+            position: "absolute",
+            left: 0,
+            top: 0,
+            width,
+            height,
+            background: dark
+              ? "rgba(0, 0, 0, 0.55)"
+              : "rgba(30, 20, 10, 0.5)",
             filter: "blur(13px)",
-            opacity: 0.16 + 0.4 * geo.depth,
+            opacity: geo.shadowOpacity,
+            clipPath:
+              geo.shadowPoly.length >= 3
+                ? `polygon(${geo.shadowPoly
+                    .map((pt) => `${fmt(pt.x)}px ${fmt(pt.y)}px`)
+                    .join(", ")})`
+                : "none",
+            transform: `translate(${fmt(geo.shadowOffset.x)}px, ${fmt(
+              geo.shadowOffset.y,
+            )}px)`,
+            pointerEvents: "none",
           }}
-        >
-          <div
-            ref={shadowInnerRef}
-            style={{
-              ...layer,
-              clipPath: poly(geo.back),
-              background: dark ? "#000" : "#241304",
-              transform: `translate(${(-geo.normal.x * 13).toFixed(1)}px, ${(-geo.normal.y * 13 + 6).toFixed(1)}px)`,
-            }}
-          />
-        </div>
-        {/* 2 · fold shadow on the revealed page, just past the crease */}
+        />
+        {/* Vệt bóng nếp gấp dọc đường tiếp tuyến. */}
         <div
           ref={foldShadowRef}
-          aria-hidden
-          style={stripInit(
-            88,
-            `linear-gradient(to right, rgba(${shadeRgb}, 0) 4%, rgba(${shadeRgb}, 0.30) 86%, rgba(${shadeRgb}, 0.34) 100%)`,
-            -34,
-            1,
-            0.35 + 0.65 * geo.depth,
-          )}
+          style={{
+            position: "absolute",
+            left: 0,
+            top: 0,
+            width: stripH,
+            height: 2 * Math.max(1, geo.radius),
+            background:
+              "linear-gradient(to bottom, transparent, rgba(0,0,0,0.32) 50%, transparent)",
+            transformOrigin: "0 0",
+            pointerEvents: "none",
+          }}
         />
-        {/* 3 · front face, clipped to the region still lying flat */}
-        {geo.near.length >= 3 && (
-          <div
-            ref={frontClipRef}
-            style={{ ...layer, clipPath: poly(geo.near), zIndex: 2 }}
-          >
+        {/* Các lát cuộn. */}
+        {Array.from({ length: CURL_LEAF_MAX_STRIPS }, (_, i) => {
+          const strip = geo.strips[i];
+          if (!strip) {
+            return (
+              <div
+                key={i}
+                ref={(el) => {
+                  stripRefs.current[i] = el;
+                }}
+                style={{ display: "none" }}
+              />
+            );
+          }
+          return (
             <div
-              style={{
-                position: "absolute",
-                left: cellX,
-                top: 0,
-                width: cellW,
-                height,
-                background: frontBg,
+              key={i}
+              ref={(el) => {
+                stripRefs.current[i] = el;
               }}
-            >
-              {front}
-            </div>
-            <div
-              ref={frontShadeRef}
-              aria-hidden
-              style={stripInit(
-                132,
-                `linear-gradient(to right, rgba(${shadeRgb}, 0) 6%, rgba(${shadeRgb}, 0.27) 50%, rgba(${shadeRgb}, 0.08) 60%, rgba(${shadeRgb}, 0) 74%)`,
-                0,
-                3,
-                0.4 + 0.6 * geo.depth,
-              )}
-            />
-          </div>
-        )}
-        {/* 4 · back face: the folded part, reflected across the crease */}
-        <div
-          ref={backClipRef}
-          style={{ ...layer, clipPath: poly(geo.back), zIndex: 4 }}
-        >
-          <div
-            ref={backInnerRef}
-            style={{
-              position: "absolute",
-              left: cellX,
-              top: 0,
-              width: cellW,
-              height,
-              background: backBg,
-              transform: `matrix(${a}, ${b}, ${c}, ${d}, ${e}, ${f})`,
-              transformOrigin: `${-cellX}px 0px`,
-            }}
-          >
-            {/*
-              The back content is the page printed on the reverse of this
-              sheet — the page that lands flat on the other side when the
-              turn completes. The fold reflection above is orientation-
-              reversing, so content drawn into the cell un-mirrored reads
-              mirrored for the whole turn and only snaps right when the
-              base spread swaps in at the end. Pre-mirroring the content
-              horizontally inside the cell composes with the fold
-              reflection to a pure rotation of the sheet: the back page
-              reads correctly at every pose, and at the landing pose it
-              matches the base spread exactly (no snap).
-            */}
-            <div
               style={{
                 position: "absolute",
                 left: 0,
                 top: 0,
-                width: cellW,
-                height,
-                transform: "scaleX(-1)",
-                transformOrigin: "50% 50%",
+                width: strip.w,
+                height: strip.h,
+                transform: strip.matrix3d,
+                transformStyle: "preserve-3d",
+                willChange: "transform, clip-path",
+                clipPath:
+                  strip.clip.length >= 3
+                    ? `polygon(${strip.clip
+                        .map((pt) => `${fmt(pt.x)}px ${fmt(pt.y)}px`)
+                        .join(", ")})`
+                    : "none",
+                pointerEvents: "none",
               }}
             >
-              {back}
+              {/* Mặt trước: chỉ hiện khi lát chưa quay quá 90°. */}
+              <div
+                ref={(el) => {
+                  frontFaceRefs.current[i] = el;
+                }}
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  backfaceVisibility: "hidden",
+                  transformStyle: "preserve-3d",
+                  overflow: "hidden",
+                  display: strip.faces === "back" ? "none" : "",
+                }}
+              >
+                <div
+                  ref={(el) => {
+                    frontContentRefs.current[i] = el;
+                  }}
+                  style={{
+                    position: "absolute",
+                    left: 0,
+                    top: 0,
+                    width: cellW,
+                    height,
+                    background: frontBg,
+                    transform: strip.contentMatrix,
+                    transformOrigin: "0 0",
+                    overflow: "hidden",
+                  }}
+                >
+                  {front}
+                </div>
+              </div>
+              {/* Mặt sau: xoay 180° quanh trục dọc để ngửa về phía
+                  người xem khi lát quay quá 90°; ma trận nội dung
+                  mặt sau (contentBackMatrix) đã tính cả phép lật
+                  này nên không cần scaleX(-1) như bản gấp thẳng. */}
+              <div
+                ref={(el) => {
+                  backFaceRefs.current[i] = el;
+                }}
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  backfaceVisibility: "hidden",
+                  transform: "rotateY(180deg)",
+                  transformStyle: "preserve-3d",
+                  overflow: "hidden",
+                  display: strip.faces === "front" ? "none" : "",
+                }}
+              >
+                <div
+                  ref={(el) => {
+                    backContentRefs.current[i] = el;
+                  }}
+                  style={{
+                    position: "absolute",
+                    left: 0,
+                    top: 0,
+                    width: cellW,
+                    height,
+                    background: backBg,
+                    transform: strip.contentBackMatrix,
+                    transformOrigin: "0 0",
+                    overflow: "hidden",
+                  }}
+                >
+                  {back}
+                </div>
+              </div>
             </div>
-          </div>
-          <div
-            ref={backShadeRef}
-            aria-hidden
-            style={stripInit(
-              150,
-              `linear-gradient(to right, rgba(${shadeRgb}, 0.20) 2%, rgba(${shadeRgb}, 0.04) 30%, rgba(255, 250, 238, 0.20) 47%, rgba(255, 250, 238, 0.04) 54%, rgba(${shadeRgb}, 0) 66%)`,
-              0,
-              5,
-              0.4 + 0.6 * geo.depth,
-            )}
-          />
-        </div>
-        {/* 5 · specular ridge along the crease */}
+          );
+        })}
+        {/* Vệt sáng gờ cuộn dọc đường gờ (s = Rπ/2). */}
         <div
           ref={ridgeRef}
-          aria-hidden
-          style={stripInit(
-            46,
-            dark
-              ? "linear-gradient(to right, rgba(255,255,255,0) 10%, rgba(255,255,255,0.05) 32%, rgba(255,255,255,0.34) 50%, rgba(0,0,0,0.28) 62%, rgba(0,0,0,0) 86%)"
-              : "linear-gradient(to right, rgba(255,255,255,0) 10%, rgba(255,255,255,0.07) 32%, rgba(255,255,255,0.48) 50%, rgba(96, 62, 24, 0.20) 61%, rgba(96, 62, 24, 0) 86%)",
-            0,
-            6,
-            0.3 + 0.7 * geo.depth,
-          )}
+          style={{
+            position: "absolute",
+            left: 0,
+            top: 0,
+            width: stripH,
+            height: 6,
+            background:
+              "linear-gradient(to bottom, transparent, rgba(255,255,255,0.55) 50%, transparent)",
+            transformOrigin: "0 0",
+            pointerEvents: "none",
+          }}
         />
       </div>
     );
