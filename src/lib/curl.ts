@@ -348,6 +348,34 @@ export function clampDragPoint(
   return { x: cx, y: clampNum(y, -h * 0.25, h * 1.25) };
 }
 
+/**
+ * Kẹp góc kéo cho lật bằng tay (v0.3.12): trục uốn vuông góc hướng
+ * kéo nên kéo góc dưới lên chéo sẽ làm trục uốn nghiêng chéo theo
+ * (video Thiện gửi 28/11, v0.3.10: dải cong chạy chéo từ góc). Kẹp
+ * thành phần dọc của điểm giữ sao cho hướng kéo không lệch quá
+ * `maxDeg` khỏi phương ngang — trục uốn theo đó không nghiêng quá
+ * `maxDeg` khỏi phương thẳng đứng (song song gáy).
+ *
+ * Giữ nguyên x của điểm giữ (tiến độ lật tính theo x nên không nhảy
+ * cóc) và không đổi gì khi góc kéo đã trong giới hạn — kéo ngang
+ * bình thường thì góc giấy bám đúng tay 100%. Chỉ kéo chéo quá mức
+ * mới bị kẹp: lúc đó góc giấy sẽ thấp hơn đầu ngón tay một đoạn
+ * (đánh đổi có chủ ý: thà góc giấy lệch tay một chút còn hơn để trục
+ * uốn nghiêng chéo như bị xoắn).
+ */
+export function clampPullAngle(
+  grab: Pt,
+  point: Pt,
+  maxDeg = 40,
+): Pt {
+  const dx = point.x - grab.x;
+  const dy = point.y - grab.y;
+  if (Math.hypot(dx, dy) < 1e-9) return point;
+  const maxDy = Math.abs(dx) * Math.tan((maxDeg * Math.PI) / 180);
+  if (Math.abs(dy) <= maxDy) return point;
+  return { x: point.x, y: grab.y + Math.sign(dy) * maxDy };
+}
+
 /** 0..1: how far the held point has travelled from `from` toward `to`
  *  along the flip axis (bản web: thả ra mà frac > 0.35 thì lật hẳn). */
 export function dragFrac(from: Pt, to: Pt, point: Pt): number {

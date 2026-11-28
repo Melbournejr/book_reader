@@ -132,7 +132,10 @@ export function spreadVisualRect(
  * Neo hình học cho một cú lật cong (xem flipGeom bản web):
  * - `spineX`: mép gáy của cell đang lật (mép trái nếu spineLeft,
  *   mép phải nếu không);
- * - `grab`: góc ngoài-dưới của cell — điểm nắm khi lật có hiệu ứng;
+ * - `grab`: điểm nắm — mặc định là góc ngoài-dưới của cell (như bản
+ *   web); lật phím/chạm/nút (v0.3.12) thì truyền `grabY = height/2`
+ *   (giữa mép ngoài) để trục uốn quét dọc song song gáy thay vì quét
+ *   chéo từ góc dưới (video Thiện gửi 28/11: dải cong chạy chéo);
  * - `mirror`: điểm nắm phản chiếu qua gáy — điểm đáp khi lật xong.
  * Đường lật có hiệu ứng đi theo cung quadBezier(grab → mirror) với
  * điểm điều khiển ở giữa, nhấc nhẹ lên trên (góc giấy quét qua gáy).
@@ -142,10 +145,11 @@ export function curlAnchors(
   cellW: number,
   spineLeft: boolean,
   height: number,
+  grabY: number = height,
 ): { spineX: number; grab: Pt; mirror: Pt } {
   const spineX = spineLeft ? cellX : cellX + cellW;
-  const grab: Pt = { x: spineLeft ? cellX + cellW : cellX, y: height };
-  const mirror: Pt = { x: 2 * spineX - grab.x, y: height };
+  const grab: Pt = { x: spineLeft ? cellX + cellW : cellX, y: grabY };
+  const mirror: Pt = { x: 2 * spineX - grab.x, y: grabY };
   return { spineX, grab, mirror };
 }
 
@@ -160,7 +164,32 @@ export function curlAnchors(
  * (60px trên trang 600px) nên không thành tấm trượt phẳng. Bản web
  * giữ 0.22h — desktop đổi có chủ ý vì trên màn hình lớn/full màn độ
  * chéo lộ rõ hơn.
+ * v0.3.12: cung lật phím/chạm/nút không còn nhấc từ góc dưới nữa mà
+ * quét dọc từ giữa mép ngoài (grabY = height/2) — điểm điều khiển chỉ
+ * nhấc nhẹ một đoạn `liftPx` trên điểm nắm (mặc định lift = 0.2h để
+ * giữ đúng hành vi cũ khi gọi 3 đối số). Trục uốn (vuông góc hướng
+ * kéo) nghiêng tối đa atan(2·liftPx/cellW) — với liftPx = 0.05·cellW
+ * thì ~6°, không phụ thuộc tỉ lệ trang (xem test v0312).
  */
-export function curlArcControl(grab: Pt, mirror: Pt, height: number): Pt {
-  return { x: (grab.x + mirror.x) / 2, y: height * 0.8 };
+export function curlArcControl(
+  grab: Pt,
+  mirror: Pt,
+  height: number,
+  liftPx?: number,
+): Pt {
+  const lift = liftPx ?? height * 0.2;
+  return { x: (grab.x + mirror.x) / 2, y: grab.y - lift };
+}
+
+/**
+ * Góc nghiêng của trục uốn so với phương thẳng đứng (độ) ở một tư
+ * thế (grab, point): trục uốn vuông góc hướng kéo nên góc này bằng
+ * góc của hướng kéo so với phương ngang. Dùng cho test v0312 (quét
+ * dọc = góc nhỏ) và để ghi chú trong code, không dùng lúc chạy.
+ */
+export function flipAxisTiltDeg(grab: Pt, point: Pt): number {
+  const dx = point.x - grab.x;
+  const dy = point.y - grab.y;
+  if (Math.hypot(dx, dy) < 2) return 0;
+  return (Math.atan2(Math.abs(dy), Math.abs(dx)) * 180) / Math.PI;
 }
