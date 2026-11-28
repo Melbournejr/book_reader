@@ -337,7 +337,11 @@ h1, h2, h3 { font-family: var(--font-serif); }
 .spread.font-sans .epub-page { font-family: var(--font-ui); }
 
 .page-face { position: absolute; inset: 0; overflow: hidden; }
-.page-img { width: 100%; height: 100%; object-fit: contain; display: block; background: #111; }
+/* v0.3.12: nền TRẮNG giấy thay cho #111 đen — ảnh trang chưa kịp vẽ
+ * (mount <img> mới lúc lật bắt đầu) thì slot hiện trang trắng như
+ * giấy thật, không bao giờ thành hố đen dưới lá (video 28/11). Trang
+ * ảnh vốn là scan trắng nên trắng là đúng màu giấy ở cả 2 theme. */
+.page-img { width: 100%; height: 100%; object-fit: contain; display: block; background: #fff; }
 .epub-page {
   padding: 30px 34px 26px; height: 100%; overflow: hidden;
   font-family: var(--font-serif);
