@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { easeOutCubic, easeOutQuint, easeInOutCubic, FLIP_MS, FLIP_MOUNT_K, FLIP_MOUNT_T, lerpPt, clampDragPoint, dragFrac, dragSettleMs, tweenPoint, quadBezier, type Pt } from "../lib/curl";
+import { easeOutCubic, easeOutQuint, easeInOutCubic, FLIP_MS, FLIP_MOUNT_K, FLIP_MOUNT_T, lerpPt, clampDragPoint, clampPullAngle, dragFrac, dragSettleMs, tweenPoint, quadBezier, type Pt } from "../lib/curl";
 import { computeSpreadLayout, curlAnchors, curlArcControl } from "../lib/layout";
 import { CurlLeaf, type CurlLeafHandle } from "./CurlLeaf";
 import {
@@ -12,6 +12,7 @@ import {
   type LeafFlip,
 } from "../lib/spread";
 import { PendingMap } from "../lib/pending";
+import { WarmImageCache } from "../lib/warmImages";
 import { api } from "../lib/api";
 import { stripHtml } from "../lib/search";
 import {
@@ -340,6 +341,12 @@ export default function Reader({
   // thành công; nội dung trang ổn định trong 1 lần mở sách nên không
   // cần dọn (mở sách khác thì component mount lại, ref reset).
   const decodedRef = useRef(new Set<number>());
+  // v0.3.12: ảnh đã giải mã được GIỮ SỐNG (xem lib/warmImages.ts) —
+  // lookahead decode xong mà thả Image thì GC thu hồi bitmap, lần
+  // mount <img> sau lại phải fetch qua protocol + decode lại nên slot
+  // trang đích đen ~200ms lúc lật bắt đầu (video 28/11). Giữ tối đa
+  // 8 ảnh (LRU): đủ spread hiện tại + lookahead 2 hướng + mặt lá.
+  const warmImagesRef = useRef(new WarmImageCache(8));
   // v0.3.8: dedup các lần nạp đang chờ theo trang (bản web: pendingRef) —
   // trang đang inflight thì caller chờ đúng promise đó thay vì tiến hành
   // với trang trống (xem PendingMap, src/lib/pending.ts).
@@ -670,16 +677,21 @@ export default function Reader({
     await Promise.all(
       pages.map(async (p, k) => {
         if (!p?.isImage) return;
+        const idx = indices[k]!;
         // v0.3.10: trang đã giải mã rồi thì bỏ qua — lật không phải
         // trả giá giải mã lại, và tween không còn việc nặng giữa chừng
         // (lookahead đã giải mã trước spread đích trong lúc rảnh).
-        if (decodedRef.current.has(indices[k])) return;
+        // v0.3.12: chỉ bỏ qua khi ảnh còn được GIỮ SỐNG trong warm
+        // cache — trang đã decode mà bị đẩy khỏi warm cache (LRU) thì
+        // decode lại để hâm nóng (cache-hit nên nhanh, chạy nền).
+        if (decodedRef.current.has(idx) && warmImagesRef.current.has(p.content)) return;
         try {
           const img = new Image();
           img.src = p.content;
           await img.decode();
-          decodedRef.current.add(indices[k]);
-          noteAspect(indices[k], img.naturalWidth, img.naturalHeight);
+          decodedRef.current.add(idx);
+          warmImagesRef.current.add(p.content, img);
+          noteAspect(idx, img.naturalWidth, img.naturalHeight);
         } catch {
           // Giải mã lỗi thì cứ lật tiếp, ảnh sẽ hiện khi trình duyệt nạp xong.
         }
@@ -1078,7 +1090,7 @@ export default function Reader({
    *  v0.3.8: cell theo spread HIỆN TẠI (curSides) — nền đang lật có
    *  thể là spread đích, cell không được đổi giữa chừng. */
   const flipGeom = useCallback(
-    (leaf: LeafFlip) => {
+    (leaf: LeafFlip, grabY?: number) => {
       const frontIsLeft = curSides.left === leaf.front;
       const cellX = !twoPage ? 0 : frontIsLeft ? 0 : leftSlotW;
       const cellW = !twoPage
@@ -1091,6 +1103,11 @@ export default function Reader({
         cellW,
         leaf.spineLeft,
         baseH,
+        // v0.3.12: lật phím/chạm/nút thì nắm GIỮA mép ngoài (grabY =
+        // baseH/2) để trục uốn quét dọc song song gáy; kéo tay thì
+        // không dùng điểm nắm này (beginDragFlip lấy đúng chỗ tay bấm)
+        // nên mặc định vẫn là góc dưới (baseH) như trước.
+        grabY ?? baseH,
       );
       return { cellX, cellW, grab, mirror };
     },
@@ -1129,7 +1146,25 @@ export default function Reader({
    *    từ placeholder thành ảnh thật giữa chừng nữa; trang đích chưa
    *    sẵn thì giữ placeholder suốt cú lật. Lookahead (effect trên)
    *    nạp + giải mã trước spread kề trong lúc đang đọc nên trường
-   *    hợp này hiếm, và việc nặng không còn chạy trong lúc tween. */
+   *    hợp này hiếm, và việc nặng không còn chạy trong lúc tween.
+   *
+   *  v0.3.12 — QUÉT DỌC + KHÔNG NỀN ĐEN (video Thiện gửi 28/11:
+   *  dải cong vẫn quét chéo từ góc dưới, và slot trang đích đen
+   *  ~200ms lúc lật bắt đầu):
+   *  - Điểm nắm lật phím/chạm/nút chuyển về GIỮA mép ngoài
+   *    (flipGeom(leaf, baseH/2)) và cung chỉ nhấc nhẹ 0.05·cellW
+   *    (curlArcControl(..., 0.05 * cellW)): trục uốn (vuông góc hướng
+   *    kéo) nghiêng tối đa ~6° so với phương thẳng đứng suốt cú lật
+   *    (đo bằng Node, xem test v0312) — trang quét dọc song song gáy
+   *    như lật giấy thật, không còn bóc chéo từ góc. Độ cong 3D vẫn
+   *    do trụ cuộn (R) tạo ra nên trang không thành tấm trượt phẳng.
+   *  - Trang đích được GIỮ SỐNG sau khi lookahead decode
+   *    (warmImagesRef — xem decodeImages): <img> của slot nền mount
+   *    sau vẽ ngay từ bitmap có sẵn, không fetch/decode lại. Và
+   *    `.page-img` không còn nền đen #111 nữa (xem styles.css) — dù
+   *    ảnh có chậm thì slot cũng hiện trang trắng, không bao giờ đen.
+   *    Lật vẫn phản hồi ngay, không await decode lúc bấm (không quay
+   *    lại kiểu đứng hình của v0.3.8). */
   const startFlip = useCallback(
     (dir: 1 | -1) => {
       if (busyRef.current) return;
@@ -1168,10 +1203,13 @@ export default function Reader({
         }
       })();
       busyRef.current = true;
-      const g = flipGeom(leaf);
+      // v0.3.12: nắm GIỮA mép ngoài (baseH/2), cung chỉ nhấc nhẹ
+      // 0.05·cellW — trục uốn quét dọc song song gáy (xem ghi chú ở
+      // trên và test v0312). Kéo tay không dùng đường này.
+      const g = flipGeom(leaf, baseH / 2);
       const p0 = g.grab;
       const p1 = g.mirror;
-      const ctrl = curlArcControl(p0, p1, baseH);
+      const ctrl = curlArcControl(p0, p1, baseH, 0.05 * g.cellW);
       const path = (k: number) => quadBezier(p0, ctrl, p1, k);
       // v0.3.10: ĐÓNG BĂNG 2 mặt lá lúc mount — renderFace đọc cache
       // ngay lúc này, JSX dùng đúng 2 node này suốt cú lật (không tạo
@@ -1528,7 +1566,10 @@ export default function Reader({
       try { window.getSelection()?.removeAllRanges(); } catch { /* bỏ qua */ }
       const ptNow =
         toSpreadPoint(latestClientRef.current.x, latestClientRef.current.y) ?? grab;
-      const point = clampDragPoint(grab, to, ptNow.x, ptNow.y, baseH);
+      // v0.3.12: kẹp góc kéo ≤40° khỏi phương ngang (xem
+      // clampPullAngle) — trục uốn không nghiêng chéo quá mức khi tay
+      // kéo góc lên xiên; kéo ngang bình thường thì không đổi gì.
+      const point = clampPullAngle(grab, clampDragPoint(grab, to, ptNow.x, ptNow.y, baseH));
       // v0.3.10: đóng băng 2 mặt lá lúc mount (như startFlip) — kéo
       // giữa chừng mà mặt sau bật từ placeholder thành ảnh thật cũng
       // là 1 cú giật khung hình.
@@ -1643,7 +1684,9 @@ export default function Reader({
       if (!pt) return;
       // Điểm giữ kẹp trên lá (không đi quá điểm đáp, không lùi quá điểm
       // nắm) — quá điểm nắm nếp gấp sẽ lộn ngược, lá rách.
-      const point = clampDragPoint(d.grab, d.to, pt.x, pt.y, baseH);
+      // v0.3.12: kẹp thêm góc kéo ≤40° khỏi phương ngang (xem
+      // clampPullAngle) để trục uốn không nghiêng chéo quá mức.
+      const point = clampPullAngle(d.grab, clampDragPoint(d.grab, d.to, pt.x, pt.y, baseH));
       // Vận tốc đã làm mượt dọc trục lật — để flick-to-turn khi thả.
       const now = performance.now();
       const dt = Math.max(1, now - d.lastT);
