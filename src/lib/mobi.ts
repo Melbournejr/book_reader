@@ -30,28 +30,61 @@ import { sniffImageMime } from "./files";
  * - 0xC0-0xFF: space + (byte XOR 0x80)
  */
 export function palmdocDecompress(data: Uint8Array): Uint8Array {
-  const out: number[] = [];
+  // v0.3.9: bộ đệm Uint8Array tăng trưởng thay cho number[] push từng
+  // byte (bản cũ) — nhanh hơn 10–30x trên text records vài MB, quyết
+  // định cho việc mở MOBI lớn. Hành vi giữ y hệt bản cũ (kể cả record
+  // lỗi: back-reference trỏ trước đầu thì điền 0).
+  let out = new Uint8Array(Math.max(16, data.length * 3));
+  let len = 0;
+  const grow = (need: number) => {
+    if (len + need <= out.length) return;
+    let cap = out.length * 2;
+    while (len + need > cap) cap *= 2;
+    const next = new Uint8Array(cap);
+    next.set(out.subarray(0, len));
+    out = next;
+  };
   let i = 0;
   while (i < data.length) {
     const b = data[i++];
     if (b === 0x00) {
-      out.push(0);
+      grow(1);
+      out[len++] = 0;
     } else if (b >= 0x01 && b <= 0x08) {
-      for (let k = 0; k < b && i < data.length; k++) out.push(data[i++]);
+      const n = Math.min(b, data.length - i);
+      grow(n);
+      out.set(data.subarray(i, i + n), len);
+      len += n;
+      i += n;
     } else if (b <= 0x7f) {
-      out.push(b);
+      grow(1);
+      out[len++] = b;
     } else if (b <= 0xbf) {
       if (i >= data.length) break;
       const v = (b << 8) | data[i++];
       const dist = (v >> 3) & 0x7ff;
-      const len = (v & 0x7) + 3;
-      const start = out.length - dist;
-      for (let k = 0; k < len; k++) out.push(out[start + k] ?? 0);
+      const n = (v & 0x7) + 3;
+      const start = len - dist;
+      if (dist === 0 || start < 0) {
+        grow(n);
+        for (let k = 0; k < n; k++) out[len++] = 0;
+      } else if (dist >= n) {
+        // Không chồng lấn: copy cả đoạn (vùng nguồn và đích rời nhau).
+        grow(n);
+        out.set(out.subarray(start, start + n), len);
+        len += n;
+      } else {
+        // Chồng lấn (dist < n): copy từng byte, đọc cả byte vừa ghi.
+        grow(n);
+        for (let k = 0; k < n; k++) out[len++] = out[start + k]!;
+      }
     } else {
-      out.push(0x20, b ^ 0x80);
+      grow(2);
+      out[len++] = 0x20;
+      out[len++] = b ^ 0x80;
     }
   }
-  return new Uint8Array(out);
+  return out.subarray(0, len);
 }
 
 // ---------------------------------------------------------------- helpers
@@ -61,7 +94,9 @@ function ascii(data: Uint8Array, off: number, len: number): string {
   return s;
 }
 
-function decodeText(bytes: Uint8Array, encoding: number): string {
+/** Giải mã text MOBI theo encoding (1252 hoặc utf-8). Export để loader
+ *  lười dùng chung. */
+export function decodeText(bytes: Uint8Array, encoding: number): string {
   try {
     return new TextDecoder(encoding === 1252 ? "windows-1252" : "utf-8").decode(bytes);
   } catch {
@@ -73,8 +108,44 @@ function escapeHtml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-/** Tách 1 đoạn HTML dài thành các trang ~6000 ký tự, cắt ở ranh giới </p>. */
-function splitPages(html: string, maxChars = 6000): string[] {
+/** Lấy phần body từ HTML đầy đủ của MOBI: bỏ script/style/head/guide,
+ *  đổi pagebreak thành ranh giới trang (ký tự pagebreak \u0001). File
+ *  không có thẻ HTML thì coi là văn bản thuần, chia đoạn thành <p>.
+ *  Dùng chung cho parseMobi (đọc cả file) và loader lười (chỉ đọc text
+ *  records) — hai đường phải xử lý chữ giống hệt nhau, chỉ khác cách
+ *  lấy ảnh. */
+export function mobiBodyHtml(html: string): string {
+  let body = html;
+  const lower = html.toLowerCase();
+  const bodyStart = lower.indexOf("<body");
+  if (bodyStart >= 0) {
+    const gt = html.indexOf(">", bodyStart);
+    const bodyEnd = lower.lastIndexOf("</body>");
+    if (gt >= 0) body = html.slice(gt + 1, bodyEnd > gt ? bodyEnd : undefined);
+  }
+  body = body
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<style[\s\S]*?<\/style>/gi, "")
+    .replace(/<head[\s\S]*?<\/head>/gi, "")
+    .replace(/<guide[\s\S]*?<\/guide>/gi, "")
+    .replace(/<mbp:pagebreak\b[^>]*>(?:<\/mbp:pagebreak>)?/gi, "\u0001")
+    .replace(/<\/mbp:pagebreak>/gi, "");
+
+  // File không có thẻ HTML: coi là văn bản thuần, chia đoạn.
+  if (!/<[a-z][\s\S]*>/i.test(body)) {
+    body = body
+      .split(/\n\s*\n/)
+      .map((p) => p.trim())
+      .filter(Boolean)
+      .map((p) => `<p>${escapeHtml(p).replace(/\n/g, "<br/>")}</p>`)
+      .join("");
+  }
+  return body;
+}
+
+/** Tách 1 đoạn HTML dài thành các trang ~6000 ký tự, cắt ở ranh giới </p>.
+ *  Export để loader lười dùng chung — hai đường chia trang giống hệt nhau. */
+export function splitPages(html: string, maxChars = 6000): string[] {
   const parts = html.split("\u0001");
   const pages: string[] = [];
   for (const part of parts) {
@@ -108,26 +179,46 @@ export interface MobiBook {
   pages: ReaderPage[];
 }
 
-export function parseMobi(data: Uint8Array, fallbackTitle: string): MobiBook {
-  if (data.length < 78) throw new Error("MOBI_KHONG_HOP_LE");
-  const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
+/** Thông tin header MOBI (record 0) — đủ để mở sách lười mà không cần
+ *  đọc cả file. Lỗi ném ra dùng mã như parseMobi (MOBI_DRM /
+ *  MOBI_HUFF / MOBI_KHONG_HOP_LE). */
+export interface MobiHeader {
+  title: string;
+  /** 1 = không nén, 2 = PalmDOC LZ77. */
+  compression: number;
+  /** 1252 (windows-1252) hoặc 65001 (utf-8). */
+  encoding: number;
+  /** Tổng số byte text (đã giải nén) theo PalmDOC header. */
+  textLength: number;
+  /** Số text record (record 1..textRecCount). */
+  textRecCount: number;
+}
+
+/** Đọc bảng record offsets từ đầu file PalmDB: 78 byte header + 8 byte
+ *  mỗi record. Trả về mảng offsets dài nRec + 1 (phần tử cuối = kích
+ *  thước file, làm mốc cuối cho record cuối). Chỉ cần đọc
+ *  78 + 8*nRec byte đầu file — với MOBI 400MB (~100k record) cũng chỉ
+ *  ~800KB. */
+export function readRecordOffsets(head: Uint8Array, fileSize: number): number[] {
+  if (head.length < 78) throw new Error("MOBI_KHONG_HOP_LE");
+  const dv = new DataView(head.buffer, head.byteOffset, head.byteLength);
   const u16 = (o: number) => dv.getUint16(o, false);
   const u32 = (o: number) => dv.getUint32(o, false);
-
-  if (ascii(data, 60, 4) !== "BOOK" || ascii(data, 64, 4) !== "MOBI") {
+  if (ascii(head, 60, 4) !== "BOOK" || ascii(head, 64, 4) !== "MOBI") {
     throw new Error("MOBI_KHONG_HOP_LE");
   }
   const nRec = u16(76);
   if (nRec < 1) throw new Error("MOBI_KHONG_HOP_LE");
+  if (head.length < 78 + nRec * 8) throw new Error("MOBI_KHONG_HOP_LE");
   const offsets: number[] = [];
   for (let r = 0; r < nRec; r++) offsets.push(u32(78 + r * 8));
-  offsets.push(data.length);
-  const rec = (i: number): Uint8Array => {
-    if (i < 0 || i >= nRec) return new Uint8Array(0);
-    return data.subarray(offsets[i], offsets[i + 1]);
-  };
+  offsets.push(fileSize);
+  return offsets;
+}
 
-  const r0 = rec(0);
+/** Đọc header MOBI từ record 0 (đã lấy riêng bằng read_range). Dùng
+ *  chung cho parseMobi (đọc cả file) và loader lười (chỉ đọc đầu file). */
+export function parseMobiHeader(r0: Uint8Array, fallbackTitle: string): MobiHeader {
   if (r0.length < 16) throw new Error("MOBI_KHONG_HOP_LE");
   const r0v = new DataView(r0.buffer, r0.byteOffset, r0.byteLength);
   const r0u16 = (o: number) => r0v.getUint16(o, false);
@@ -176,6 +267,20 @@ export function parseMobi(data: Uint8Array, fallbackTitle: string): MobiBook {
       // EXTH lỗi thì kệ, vẫn dùng tiêu đề đã có.
     }
   }
+  return { title, compression, encoding, textLength, textRecCount };
+}
+
+export function parseMobi(data: Uint8Array, fallbackTitle: string): MobiBook {
+  if (data.length < 78) throw new Error("MOBI_KHONG_HOP_LE");
+  const offsets = readRecordOffsets(data, data.length);
+  const nRec = offsets.length - 1;
+  const rec = (i: number): Uint8Array => {
+    if (i < 0 || i >= nRec) return new Uint8Array(0);
+    return data.subarray(offsets[i]!, offsets[i + 1]!);
+  };
+
+  const r0 = rec(0);
+  const { title, compression, encoding, textLength, textRecCount } = parseMobiHeader(r0, fallbackTitle);
 
   // Nối text records 1..textRecCount (giới hạn theo số record thật có).
   const nText = Math.min(textRecCount, nRec - 1);
@@ -212,37 +317,13 @@ export function parseMobi(data: Uint8Array, fallbackTitle: string): MobiBook {
     return `data:${sniffImageMime(bytes)};base64,${btoa(b64)}`;
   };
 
-  // Lấy phần body (nếu có), bỏ script/style/head/guide, đổi pagebreak
-  // thành ranh giới trang (ký tự ).
-  let body = html;
-  const lower = html.toLowerCase();
-  const bodyStart = lower.indexOf("<body");
-  if (bodyStart >= 0) {
-    const gt = html.indexOf(">", bodyStart);
-    const bodyEnd = lower.lastIndexOf("</body>");
-    if (gt >= 0) body = html.slice(gt + 1, bodyEnd > gt ? bodyEnd : undefined);
-  }
-  body = body
-    .replace(/<script[\s\S]*?<\/script>/gi, "")
-    .replace(/<style[\s\S]*?<\/style>/gi, "")
-    .replace(/<head[\s\S]*?<\/head>/gi, "")
-    .replace(/<guide[\s\S]*?<\/guide>/gi, "")
-    .replace(/<mbp:pagebreak\b[^>]*>(?:<\/mbp:pagebreak>)?/gi, "\u0001")
-    .replace(/<\/mbp:pagebreak>/gi, "");
-  body = body.replace(/<img\b[^>]*recindex=["']?(\d+)["']?[^>]*>/gi, (_m, n) => {
-    const url = imageUrl(parseInt(n, 10));
-    return url ? `<img src="${url}" />` : "";
-  });
-
-  // File không có thẻ HTML: coi là văn bản thuần, chia đoạn.
-  if (!/<[a-z][\s\S]*>/i.test(body)) {
-    body = body
-      .split(/\n\s*\n/)
-      .map((p) => p.trim())
-      .filter(Boolean)
-      .map((p) => `<p>${escapeHtml(p).replace(/\n/g, "<br/>")}</p>`)
-      .join("");
-  }
+  const body = mobiBodyHtml(html).replace(
+    /<img\b[^>]*recindex=["']?(\d+)["']?[^>]*>/gi,
+    (_m, n) => {
+      const url = imageUrl(parseInt(n, 10));
+      return url ? `<img src="${url}" />` : "";
+    },
+  );
 
   const pageHtmls = splitPages(body);
   if (pageHtmls.length === 0) throw new Error("MOBI_KF8");

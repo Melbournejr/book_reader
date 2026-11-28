@@ -187,6 +187,41 @@ export function foldGeometry(
 
 /* ---- easing + point tweening (shared by animated and settle flips) ---- */
 
+/**
+ * v0.3.9 — đảm bảo điểm giữ luôn cho hình học gấp hợp lệ.
+ *
+ * `foldGeometry` trả null khi điểm giữ cách điểm nắm < 2px (len < 2)
+ * hoặc nếp gấp chỉ chạm mép cell (far < 3 điểm). Đó chính là lỗi làm
+ * lá lật TÀNG HÌNH từ v0.3.7: Reader mount CurlLeaf với
+ * `point = grab` (điểm giữ trùng điểm nắm) nên `foldGeometry` trả
+ * null, CurlLeaf trả null, không có DOM nào cho imperative handle
+ * viết vào — lá không bao giờ hiện trong cả cú lật. Bản web mount
+ * lá ở `path(easeOutQuart(0.03))` (đã chếch vào trong cú lật) nên
+ * không gặp lỗi này.
+ *
+ * Hàm này là lưới an toàn cuối cùng: nếu điểm giữ đã hợp lệ thì trả
+ * nguyên nó (không đổi hành vi); nếu suy biến thì đẩy nó ra xa điểm
+ * nắm vài px theo hướng về phía gáy (hướng lật) cho tới khi hình học
+ * hợp lệ. CurlLeaf dùng nó cho cả lần render đầu và mỗi lần
+ * `update()` — lá không bao giờ biến mất vì một tư thế suy biến.
+ */
+export function ensureFoldPoint(
+  grab: Pt,
+  point: Pt,
+  cell: { x: number; y: number; w: number; h: number },
+  arena: { x: number; y: number; w: number; h: number },
+): Pt {
+  if (foldGeometry(grab, point, cell, arena) !== null) return point;
+  // Điểm nắm nằm ở mép cell đối diện gáy (xem layout.curlAnchors) —
+  // hướng lật là từ điểm nắm về phía gáy, tức về phía giữa cell.
+  const dirX = grab.x >= cell.x + cell.w / 2 ? -1 : 1;
+  for (const d of [4, 8, 16, 32]) {
+    const p = { x: grab.x + dirX * d, y: grab.y };
+    if (foldGeometry(grab, p, cell, arena) !== null) return p;
+  }
+  return point;
+}
+
 export const easeOutCubic = (t: number) => 1 - Math.pow(1 - t, 3);
 export const easeOutQuart = (t: number) => 1 - Math.pow(1 - t, 4);
 export const easeOutQuint = (t: number) => 1 - Math.pow(1 - t, 5);
