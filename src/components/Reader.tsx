@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { easeOutCubic, easeOutQuart, easeOutQuint, FLIP_MS, lerpPt, clampDragPoint, dragFrac, dragSettleMs, tweenPoint, quadBezier, type Pt } from "../lib/curl";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { easeOutCubic, easeOutQuint, easeInOutCubic, FLIP_MS, FLIP_MOUNT_K, FLIP_MOUNT_T, lerpPt, clampDragPoint, dragFrac, dragSettleMs, tweenPoint, quadBezier, type Pt } from "../lib/curl";
 import { computeSpreadLayout, curlAnchors, curlArcControl } from "../lib/layout";
 import { CurlLeaf, type CurlLeafHandle } from "./CurlLeaf";
 import {
   flipBaseSides,
   leafForFlip,
+  lookaheadPages,
   nextSpreadStart,
   spreadSides,
   spreadStartForPage,
@@ -77,7 +78,7 @@ interface CurlState {
   next: number;
   dir: 1 | -1;
   /** v0.3.9: điểm giữ lúc mount lá — PHẢI chếch vào trong cú lật
-   *  (path(easeOutQuart(0.03)) với lật phím/nút, điểm tay hiện tại với
+   *  (path(FLIP_MOUNT_K) với lật phím/nút, điểm tay hiện tại với
    *  lật kéo). Trước đây JSX truyền point=grab nên foldGeometry trả
    *  null, CurlLeaf trả null, lá tàng hình suốt cả cú lật (v0.3.7–
    *  v0.3.8). Xem lib/curl.ts ensureFoldPoint. */
@@ -332,6 +333,13 @@ export default function Reader({
   const stopTtsRef = useRef<() => void>(() => {});
 
   const cacheRef = useRef(new Map<number, ReaderPage>());
+  // v0.3.10: trang nào đã giải mã xong (xem decodeImages) — lookahead
+  // giải mã trước spread kề trong lúc rảnh, lúc bấm lật thì decodeImages
+  // bỏ qua hết (không tạo lại Image, không giải mã lại) nên tween không
+  // còn việc nặng giữa chừng. Trang chỉ vào tập này sau khi decode
+  // thành công; nội dung trang ổn định trong 1 lần mở sách nên không
+  // cần dọn (mở sách khác thì component mount lại, ref reset).
+  const decodedRef = useRef(new Set<number>());
   // v0.3.8: dedup các lần nạp đang chờ theo trang (bản web: pendingRef) —
   // trang đang inflight thì caller chờ đúng promise đó thay vì tiến hành
   // với trang trống (xem PendingMap, src/lib/pending.ts).
@@ -346,6 +354,11 @@ export default function Reader({
   const [curl, setCurlState] = useState<CurlState | null>(null);
   const curlRef = useRef<CurlState | null>(null);
   const leafRef = useRef<CurlLeafHandle | null>(null);
+  // v0.3.10: 2 mặt lá ĐÓNG BĂNG lúc mount (xem startFlip/beginDragFlip)
+  // — mặt sau không được bật từ placeholder "Đang tải trang…" thành
+  // ảnh thật giữa chừng (1 cú giật khung hình ở v0.3.9). Dọn cùng lúc
+  // với lá ở finishFlip/cancelFlip.
+  const leafFacesRef = useRef<{ front: ReactNode; back: ReactNode } | null>(null);
   const cancelTweenRef = useRef<(() => void) | null>(null);
   const pointRafRef = useRef(0);
   const pendingPointRef = useRef<Pt | null>(null);
@@ -657,10 +670,15 @@ export default function Reader({
     await Promise.all(
       pages.map(async (p, k) => {
         if (!p?.isImage) return;
+        // v0.3.10: trang đã giải mã rồi thì bỏ qua — lật không phải
+        // trả giá giải mã lại, và tween không còn việc nặng giữa chừng
+        // (lookahead đã giải mã trước spread đích trong lúc rảnh).
+        if (decodedRef.current.has(indices[k])) return;
         try {
           const img = new Image();
           img.src = p.content;
           await img.decode();
+          decodedRef.current.add(indices[k]);
           noteAspect(indices[k], img.naturalWidth, img.naturalHeight);
         } catch {
           // Giải mã lỗi thì cứ lật tiếp, ảnh sẽ hiện khi trình duyệt nạp xong.
@@ -668,6 +686,39 @@ export default function Reader({
       }),
     );
   }, [noteAspect]);
+
+  // v0.3.10: LOOKAHEAD — nạp + giải mã TRƯỚC spread kề (tới + lui)
+  // trong lúc đang đọc, khi máy rảnh (300ms sau khi spread yên).
+  // (Effect này phải đặt SAU decodeImages — deps của useEffect tính
+  // ngay lúc render nên dùng biến khai báo sau sẽ lỗi TDZ.)
+  // v0.3.9 lật ngay nhưng decode chạy nền TRONG lúc tween: ensure
+  // xong tăng cacheVersion -> re-render cả Reader giữa chừng, mặt sau
+  // lá bật từ placeholder thành ảnh thật giữa chừng — mỗi cái là 1 cú
+  // giật khung hình. Lookahead dời hết việc nặng ra khỏi tween: lúc
+  // bấm lật, trang đích đã nằm sẵn trong cache + đã giải mã, lá chỉ
+  // việc chạy. Nếu người dùng lật trước khi lookahead chạy xong thì
+  // cú lật vẫn chạy ngay như v0.3.9 (placeholder thay vì đứng hình).
+  // Lật nhanh liên tục thì timeout bị hủy theo mỗi lần đổi spread nên
+  // không tranh việc với tween.
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      if (busyRef.current) return; // đang lật thì thôi, lật xong effect chạy lại
+      const pages = lookaheadPages(cur, twoPage, rtl, total);
+      if (pages.length === 0) return;
+      void (async () => {
+        try {
+          await ensure(pages);
+          await decodeImages(
+            pages,
+            pages.map((p) => cacheRef.current.get(p)),
+          );
+        } catch {
+          // Kệ — lật vẫn chạy, mặt lá hiện placeholder rồi tự nét.
+        }
+      })();
+    }, 300);
+    return () => window.clearTimeout(t);
+  }, [cur, nextSpread, total, twoPage, rtl, ensure, decodeImages]);
 
   // v0.3.9: chờ 1 promise nhưng tối đa `ms` — quá hạn thì tiếp tục với
   // trang placeholder thay vì treo mãi (vd Rust invoke treo, img.decode
@@ -989,6 +1040,9 @@ export default function Reader({
       setSpread(next);
       onProgress(next, total);
       setCurl(null);
+      // v0.3.10: dọn cả 2 mặt lá đã đóng băng — không còn dải mỏng/mảnh
+      // trang nào sót lại trên spread đã yên.
+      leafFacesRef.current = null;
       // KHÔNG reset scroll ở đây: người đang zoom to + rê trang thì lật
       // xong phải giữ nguyên vị trí rê; scroll cũ chỉ cần reset khi
       // vào/ra full màn (xem effect ở dưới).
@@ -1014,6 +1068,8 @@ export default function Reader({
     dragRef.current = null;
     pendingDragRef.current = null;
     setCurl(null);
+    // v0.3.10: dọn cả 2 mặt lá đã đóng băng (như finishFlip).
+    leafFacesRef.current = null;
   }, [stopTween, cancelPendingPoint, setCurl]);
 
   /** Cell + điểm nắm/đáp của lá cho một cú lật (theo mô hình spread).
@@ -1042,7 +1098,7 @@ export default function Reader({
   );
 
   /** Lật có hiệu ứng (phím/nút/chạm/mép): lá cong quét theo cung
-   *  ~900ms, easeOutQuart.
+   *  ~900ms, easing hình chữ S (easeInOutCubic — v0.3.10).
    *
    *  v0.3.9 — LẬT PHẢN HỒI NGAY (mô hình trình xem video, thay cho
    *  "chờ decode xong mới lật" của v0.3.8):
@@ -1058,7 +1114,22 @@ export default function Reader({
    *    không bao giờ hiện sai trang, không bao giờ đứng hình.
    *  - Nhãn chỉ đổi ở finishFlip (cuối tween) như cũ — không lệch
    *    nhãn/ảnh.
-   *  Không chờ tween: khóa busyRef giữ tới khi finishFlip dọn. */
+   *  Không chờ tween: khóa busyRef giữ tới khi finishFlip dọn.
+   *
+   *  v0.3.10 — MƯỢT + ĐÚNG VẬT LÝ GIẤY (video Thiện gửi 28/11: lá đã
+   *  hiện nhưng "nhảy khung hình", nếp gấp chéo như bị xoắn):
+   *  - Easing chữ S thay cho easeOutQuart: easeOutQuart có vận tốc lớn
+   *    nhất ngay lúc bắt đầu (34% đường trong 100ms đầu) rồi bò chậm
+   *    dần — trên video là cú "bật" rồi đứng hình; giấy thật thì nhấc
+   *    chậm, quét nhanh giữa, đáp nhẹ (xem lib/curl.ts easeInOutCubic).
+   *  - Cung lật dẹt hơn (curlArcControl y=0.8h thay cho 0.22h của bản
+   *    web): nếp gấp chỉ nghiêng tối đa ~15° thay cho ~47°, quét ngang
+   *    trang như lật giấy thật (đo bằng Node, xem test v0310).
+   *  - 2 mặt lá ĐÓNG BĂNG lúc mount (leafFacesRef): mặt sau không bật
+   *    từ placeholder thành ảnh thật giữa chừng nữa; trang đích chưa
+   *    sẵn thì giữ placeholder suốt cú lật. Lookahead (effect trên)
+   *    nạp + giải mã trước spread kề trong lúc đang đọc nên trường
+   *    hợp này hiếm, và việc nặng không còn chạy trong lúc tween. */
   const startFlip = useCallback(
     (dir: 1 | -1) => {
       if (busyRef.current) return;
@@ -1102,13 +1173,23 @@ export default function Reader({
       const p1 = g.mirror;
       const ctrl = curlArcControl(p0, p1, baseH);
       const path = (k: number) => quadBezier(p0, ctrl, p1, k);
+      // v0.3.10: ĐÓNG BĂNG 2 mặt lá lúc mount — renderFace đọc cache
+      // ngay lúc này, JSX dùng đúng 2 node này suốt cú lật (không tạo
+      // lại mỗi lần re-render) nên mặt sau không bật từ placeholder
+      // thành ảnh thật giữa chừng. Trang đích chưa sẵn thì mặt sau giữ
+      // placeholder suốt cú lật; lookahead làm trường hợp này hiếm.
+      leafFacesRef.current = {
+        front: renderFace(cacheRef.current.get(leaf.front), false, leaf.front),
+        back: renderFace(cacheRef.current.get(leaf.back), false, leaf.back),
+      };
       // Mount lá hơi chếch vào trong cú lật để 2 mặt đều là trang thật
       // đã vẽ xong, rồi để 2 khung hình trôi qua mới cho lá chạy
       // (tweenPoint preFrames): mount và chuyển động giành nhau cùng
       // khung hình sẽ làm lật giật ngay lúc bắt đầu. Điểm mount PHẢI
-      // là path(easeOutQuart(0.03)) như bản web — mount ở đúng điểm
-      // nắm (point=grab) làm foldGeometry trả null, lá tàng hình
-      // (v0.3.7–v0.3.8).
+      // là path(FLIP_MOUNT_K) — mount ở đúng điểm nắm (point=grab) làm
+      // foldGeometry trả null, lá tàng hình (v0.3.7–v0.3.8); và với
+      // easing chữ S thì path(ease(0.03)) gần như trùng điểm nắm nên
+      // không dùng được (xem lib/curl.ts FLIP_MOUNT_K/T).
       setCurl({
         front: leaf.front,
         back: leaf.back,
@@ -1116,14 +1197,14 @@ export default function Reader({
         cellW: g.cellW,
         grab: g.grab,
         mirror: g.mirror,
-        point: path(easeOutQuart(0.03)),
+        point: path(FLIP_MOUNT_K),
         next: leaf.next,
         dir,
         base,
       });
       cancelTweenRef.current = tweenPoint(
         FLIP_MS,
-        easeOutQuart,
+        easeInOutCubic,
         path,
         applyPoint,
         () => {
@@ -1131,7 +1212,7 @@ export default function Reader({
           finishFlip(leaf.next);
         },
         2,
-        0.03,
+        FLIP_MOUNT_T,
       );
     },
     [
@@ -1448,6 +1529,13 @@ export default function Reader({
       const ptNow =
         toSpreadPoint(latestClientRef.current.x, latestClientRef.current.y) ?? grab;
       const point = clampDragPoint(grab, to, ptNow.x, ptNow.y, baseH);
+      // v0.3.10: đóng băng 2 mặt lá lúc mount (như startFlip) — kéo
+      // giữa chừng mà mặt sau bật từ placeholder thành ảnh thật cũng
+      // là 1 cú giật khung hình.
+      leafFacesRef.current = {
+        front: renderFace(cacheRef.current.get(leaf.front), false, leaf.front),
+        back: renderFace(cacheRef.current.get(leaf.back), false, leaf.back),
+      };
       // point = điểm tay HIỆN TẠI (đã kẹp theo cung lật) — lá mount
       // với điểm này nên foldGeometry có nghiệm, lá hiện ngay theo tay
       // (trước đây mount ở grab nên lá tàng hình).
@@ -1988,8 +2076,14 @@ export default function Reader({
                   frontBg={pageTheme === "paper" ? "#f1e5c8" : pageTheme === "night" ? "#1c1a17" : "#fdfcf8"}
                   backBg={pageTheme === "paper" ? "#f1e5c8" : pageTheme === "night" ? "#1c1a17" : "#fdfcf8"}
                   dark={isComic}
-                  front={renderFace(cacheRef.current.get(curl.front), false, curl.front)}
-                  back={renderFace(cacheRef.current.get(curl.back), false, curl.back)}
+                  // v0.3.10: dùng 2 mặt đã ĐÓNG BĂNG lúc mount
+                  // (leafFacesRef) — re-render giữa chừng (ensure xong
+                  // tăng cacheVersion) không tạo lại mặt lá, mặt sau
+                  // không bật từ placeholder thành ảnh thật giữa chừng.
+                  // Fallback renderFace chỉ phòng đường mount nào quên
+                  // đóng băng.
+                  front={leafFacesRef.current?.front ?? renderFace(cacheRef.current.get(curl.front), false, curl.front)}
+                  back={leafFacesRef.current?.back ?? renderFace(cacheRef.current.get(curl.back), false, curl.back)}
                 />
               )}
             </div>
