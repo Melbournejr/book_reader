@@ -129,20 +129,26 @@ export const CurlLeaf = forwardRef<CurlLeafHandle, CurlLeafProps>(
         el.style.width = `${strip.w}px`;
         el.style.height = `${strip.h}px`;
         el.style.transform = strip.matrix3d;
-        el.style.clipPath =
-          strip.clip.length >= 3
-            ? `polygon(${strip.clip
-                .map((pt) => `${fmt(pt.x)}px ${fmt(pt.y)}px`)
-                .join(", ")})`
-            : "none";
+        // v0.3.13: KHÔNG đặt clip-path lên lát hay mặt — clip-path
+        // (grouping property) ép transform-style thành flat, phá vỡ
+        // backface-visibility: mặt sau không bao giờ hiện, mặt trước
+        // hiện NGƯỢC khi lát quay quá 90°. Đã thử dời clip từ lát
+        // xuống 2 mặt (bundle đã kiểm đúng) — ảnh chụp vẫn
+        // pixel-identical với bản lỗi, tức clip ở mặt cũng phá.
+        // Chỉ còn overflow:hidden của mặt cắt nội dung theo hộp
+        // lát; đa giác cắt bỏ hẳn (đã kiểm bằng mắt ở kéo giữ
+        // 60%/40%: không thấy tam giác thừa lộ).
+        const clip = "none";
         const frontFace = frontFaceRefs.current[i];
         const backFace = backFaceRefs.current[i];
         const frontContent = frontContentRefs.current[i];
         const backContent = backContentRefs.current[i];
         if (frontFace) {
+          frontFace.style.clipPath = clip;
           frontFace.style.display = strip.faces === "back" ? "none" : "";
         }
         if (backFace) {
+          backFace.style.clipPath = clip;
           backFace.style.display = strip.faces === "front" ? "none" : "";
         }
         if (frontContent) {
@@ -331,13 +337,7 @@ export const CurlLeaf = forwardRef<CurlLeafHandle, CurlLeafProps>(
                 height: strip.h,
                 transform: strip.matrix3d,
                 transformStyle: "preserve-3d",
-                willChange: "transform, clip-path",
-                clipPath:
-                  strip.clip.length >= 3
-                    ? `polygon(${strip.clip
-                        .map((pt) => `${fmt(pt.x)}px ${fmt(pt.y)}px`)
-                        .join(", ")})`
-                    : "none",
+                willChange: "transform",
                 pointerEvents: "none",
               }}
             >
