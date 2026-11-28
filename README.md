@@ -196,6 +196,92 @@ không có đọc manga phải → trái. Bản này sửa cả 3 + làm lại g
   không, lật còn ngược không (nhất là truyện ảnh CBZ), manga lật đúng
   chiều + đúng trang chưa, menu mở/đóng có mượt không.
 
+### v0.3.11 — lật CUỘN TRỤ thật: trang uốn cong có bán kính, hết nếp gấp thẳng sắc (28/11/2026)
+Thiện test v0.3.10: "Chưa thực sự giải quyết được vấn đề. Tao thấy mày
+gần như là không muốn giải quyết thì phải." Kèm video 28.85s (CBZ I Am A
+Hero, Trang 22–23/605 RTL, sidebar xác nhận v0.3.10).
+
+**Chẩn đoán (xem frame video thật + đọc code thật):**
+
+1. **Người dùng KÉO GIỮ góc trang, không bấm phím/chạm.** Lá giữ nguyên
+   tư thế gập từ t≈1s đến t≈7s mới đáp; con trỏ chuột thấy rõ ở góc
+   dưới-trái trang trái; máy quay dí sát vào nếp gấp ở t=3–6s. Một cú
+   lật phím/chạm chỉ ~691ms nên không thể kéo dài 6s — đây là drag.
+2. **Nếp gấp là ĐƯỜNG GẤP THẲNG CHÉO SẮC, mặt sau BỊ XÉO.** Cận cảnh
+   t=5s: đường chéo thẳng từ góc trên-trái xuống góc dưới-phải của lá;
+   mặt sau (mặt người đeo kính) biến dạng dọc đường chéo; trang trông
+   như TẤM BÌA CỨNG phẳng gập theo đường thẳng, không phải giấy cuộn.
+3. **Gốc rễ: `foldGeometry` (`src/lib/curl.ts`) mô hình cú lật bằng
+   MỘT đường gấp thẳng duy nhất** (nếp = đường trung trực grab→point,
+   mặt sau = phản xạ qua nếp). Một đường gấp thẳng không bao giờ vẽ
+   được giấy đang cuộn khi nhìn gần; "curl" cũ chỉ là dải bóng/viền
+   giả. v0.3.10 chỉ sửa CHUYỂN ĐỘNG (easing, cung) mà không sửa HÌNH
+   DẠNG nếp gấp — nên nhìn vẫn sai. Đây là trần của mô hình, chỉnh
+   easing/cung bao nhiêu cũng không vượt qua được. (Mặt sau "xéo"
+   thực ra không phải shear: hợp của pre-mirror scaleX(-1) và phản xạ
+   qua nếp là một phép quay cứng π−2α; khi nếp nghiêng ~30–45° thì mặt
+   sau xoay ~90–120° nguyên khối nên tranh đọc như bị nghiêng/xéo.)
+4. **Đường kéo desktop KHÔNG thua bản web.** So sánh từng dòng
+   `Reader.tsx` (onPointerDown/Move/Up, beginDragFlip, toSpreadPoint,
+   pushPoint, settleDrag) với bản web `ComicReader.tsx`: giống hệt
+   nhau về ánh xạ điểm kéo — grab tại điểm bấm kẹp 12% khỏi gáy, đích
+   = ảnh gương của grab qua gáy, cùng công thức `clampDragPoint`, cùng
+   ngưỡng mount >9px, cùng làm mượt vận tốc, cùng luật đáp (vượt 35%
+   hoặc flick nhanh thì đáp). Cả `foldGeometry` của web và desktop
+   cũng giống hệt nhau (diff chỉ khác comment + safety net). Nghĩa là
+   bản web giữ yên lá giữa chừng rồi dí camera vào nếp gấp cũng sẽ
+   hiện ĐÚNG đường chéo sắc + mặt xéo đó — người dùng nhớ web tốt hơn
+   chỉ vì trước đây chỉ lật nhanh bằng phím/chạm (nếp quét qua trong
+   900ms, không kịp soi), chưa bao giờ giữ lá web đứng yên giữa chừng.
+
+**Sửa (mới `src/lib/curlGeometry.ts`, viết lại
+`src/components/CurlLeaf.tsx`; giữ nguyên `startFlip` /
+`beginDragFlip` / `settleDrag`, easing chữ S, lookahead, mặt lá đóng
+băng của v0.3.10; không đổi pairing RTL, MOBI lười, API Rust):**
+
+- **Cuộn trụ (cylinder curl):** trang quấn quanh một hình trụ bán kính
+  R (mặc định clamp(cellW×0.12, 32, 64)px, tức vùng uốn Rπ chiếm
+  20–50% chiều rộng trang) lăn ngang trang. Điểm tiếp tuyến F tính
+  từ BẢO TOÀN ĐỘ DÀI CUNG (s_g − R·sin(s_g/R) = δ, giải bằng bisection;
+  kéo 1px thì s_g ≈ 24px — luật bóc (6R²δ)^1/3), không phải đường
+  trung trực. Vùng uốn chia thành tối đa 12 lát, mỗi lát là một mặt
+  phẳng cứng xoay một góc nhỏ (bước góc tối đa 15°) — góc uốn tăng
+  dần dọc dải, không có bước nhảy nào lớn, không có đường gấp sắc.
+  Mỗi lát là một phép QUAY cứng (ma trận 3D trực giao, định thức +1):
+  không shear — hình vuông trên mặt sau vẫn là hình vuông.
+- **Mặt sau đặt đúng vị trí vật chất:** mỗi lát có 2 mặt (trước/sau),
+  mặt sau xoay 180° quanh trục dọc lát (rotateY) + ma trận nội dung
+  riêng (contentBackMatrix) đã tính cả phép soi gương qua tờ giấy lẫn
+  phép lật rotateY — không cần pre-mirror scaleX(-1) như trước.
+  `Reader.tsx` chỉ thêm `mirror={curl.mirror}` cho CurlLeaf.
+- **Bán kính thu nhỏ mượt về 0 ở 15% cuối** (smoothstep 0.85→1) để
+  trang đáp phẳng đúng vị trí, không bị "rơi" 2R; tư thế cuối: R=0,
+  1 lát phẳng mặt sau, góc giấy ở đúng mirror.
+- **Bóng + gờ:** bóng đổ = hình chiếu phẳng của phần đã nhấc lên,
+  lệch 10px về mép tự do + 6px xuống, đậm dần giữa chừng; vệt bóng
+  dọc đường tiếp tuyến; vệt sáng dọc đường gờ (s = Rπ/2), sáng nhất
+  giữa chừng.
+- **Số đo (test mới
+  `~/workspace/goals/pc-book-reading-software/hidden_files/v0311-true-curl-test.ts`,
+  51 test):** góc giấy trùng point <1.5px ở mọi tư thế (đầu/giữa/cuối,
+  cả LTR); bước góc giữa 2 lát kề ≤ 0.28 rad, không bước nào chiếm
+  >40% tổng góc khi uốn lớn (đối chiếu: foldGeometry cũ chỉ có 1
+  nếp); mọi lát là quay cứng (cột đơn vị, trực giao, det +1); hình
+  vuông 40×40 trên mặt sau giữ tỉ lệ <1.02 và góc vuông cos <0.02;
+  điểm ảnh mặt sau (0,0) trùng điểm ảnh mặt trước (cellW,0) sau
+  rotateY; đường tiếp tuyến đi theo tay mượt (nhảy <40px mỗi bước
+  40px), tiến độ đơn điệu; các lát phủ kín [sMin, sMax] không khe hở;
+  R liên tục, R(p=0)=R(p=0.5)=48px, R(p=1)=0.
+- **Chi phí:** mỗi lát chứa 1 bản sao nội dung trang (tối đa 14 lát)
+  — với truyện ảnh (CBZ) là 14 thẻ `<img>` chung 1 ảnh đã giải mã
+  nên rẻ; với sách chữ là 14 bản sao DOM văn bản, layout 1 lần lúc
+  mount lá. Lá chỉ mount trong lúc lật rồi tháo ngay.
+- **Chưa kiểm được:** không có WebView trên VM — cảm nhận lật trên
+  máy thật của Thiện mới là cửa cuối (lá có cong mềm như giấy thật
+  khi kéo giữ + dí camera vào nếp gấp không, mặt sau còn xéo không,
+  bóng/gờ có tự nhiên không). Toàn bộ test cũ vẫn pass (101 + 13 +
+  41 + 44 + 688 + 42 = 929) + 51 test mới = **980/980**.
+
 ### v0.3.10 — lật mượt + đúng vật lý giấy thật: easing chữ S, cung dẹt, lookahead (28/11/2026)
 Thiện test v0.3.9: "Đã có hiệu ứng lật trang. Nhưng cần chỉnh thêm mượt
 hơn, không bị nhảy khung hình. Phần lật trang tao cần chuẩn theo hiệu
