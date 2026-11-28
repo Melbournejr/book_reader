@@ -226,6 +226,31 @@ export const easeOutCubic = (t: number) => 1 - Math.pow(1 - t, 3);
 export const easeOutQuart = (t: number) => 1 - Math.pow(1 - t, 4);
 export const easeOutQuint = (t: number) => 1 - Math.pow(1 - t, 5);
 
+/**
+ * Easing hình chữ S cho lật phím/nút (v0.3.10 — vật lý giấy thật):
+ * nhấc chậm — quét nhanh giữa — đáp nhẹ. easeOutQuart (v0.3.7–v0.3.9)
+ * có vận tốc LỚN NHẤT ngay lúc bắt đầu (34% đường trong 100ms đầu,
+ * 59% sau 180ms) rồi bò chậm dần — trên video đó là cú "bật" rồi đứng
+ * hình, ngược hoàn toàn với cách lật giấy ngoài đời (tay phải nhấc góc
+ * lên từ từ, quét nhanh qua giữa, đặt nhẹ xuống). easeInOutCubic có
+ * vận tốc 0 ở cả 2 đầu, lớn nhất ở giữa (~24% đường mỗi 100ms quanh
+ * giữa cú lật) — xem test v0310.
+ *
+ * Vì đầu đường cong chữ S gần như phẳng nên KHÔNG mount lá ở
+ * path(ease(0.03)) như trước được (điểm đó gần như trùng điểm nắm,
+ * hình học gấp suy biến — lại tàng hình). Lá mount ở đúng k =
+ * FLIP_MOUNT_K trên ĐƯỜNG ĐI, tween bắt đầu ở thời điểm FLIP_MOUNT_T
+ * (nghịch đảo của easing tại k đó) để không nhảy về điểm nắm.
+ */
+export const easeInOutCubic = (t: number) =>
+  t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+/** Lá mount ở 5% đường lật — đủ xa điểm nắm để hình học gấp hợp lệ
+ *  (len ~40px trên trang truyện), đủ nhỏ để vẫn đọc là "vừa nhấc góc". */
+export const FLIP_MOUNT_K = 0.05;
+/** Thời điểm ứng với FLIP_MOUNT_K trên easeInOutCubic (nửa đầu:
+ *  ease(t) = 4t³ nên t = ∛(k/4)). */
+export const FLIP_MOUNT_T = Math.cbrt(FLIP_MOUNT_K / 4);
+
 export function quadBezier(p0: Pt, pc: Pt, p1: Pt, t: number): Pt {
   const a = (1 - t) * (1 - t);
   const b = 2 * (1 - t) * t;

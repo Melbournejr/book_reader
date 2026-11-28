@@ -78,6 +78,38 @@ export function nextSpreadStart(
   return n >= 0 ? n : null;
 }
 
+/**
+ * Trang cần nạp trước (lookahead) khi đang đọc ở spread `spreadStart`
+ * (v0.3.10): 2 trang của spread KẾ TIẾP theo thứ tự đọc + 2 trang của
+ * spread TRƯỚC ĐÓ — để lúc bấm lật, trang đích đã nằm sẵn trong cache
+ * và đã giải mã, tween không còn phải chờ decode hay re-render giữa
+ * chừng (nguồn gốc "nhảy khung hình" ở v0.3.9). Trả về chỉ số trang
+ * duy nhất, đã sắp xếp, trong giới hạn [0, total). Bìa/đầu/cuối sách
+ * thì chỉ còn 1 phía (vd bìa RTL chỉ có spread kế tiếp).
+ */
+export function lookaheadPages(
+  spreadStart: number,
+  twoPage: boolean,
+  rtl: boolean,
+  total: number,
+): number[] {
+  const cur = spreadStartForPage(spreadStart, twoPage, rtl, total);
+  const pages: number[] = [];
+  const next = nextSpreadStart(cur, 1, twoPage, rtl, total);
+  if (next !== null) {
+    const s = spreadSides(next, twoPage, rtl, total);
+    if (s.left !== null) pages.push(s.left);
+    if (s.right !== null) pages.push(s.right);
+  }
+  const prev = nextSpreadStart(cur, -1, twoPage, rtl, total);
+  if (prev !== null) {
+    const s = spreadSides(prev, twoPage, rtl, total);
+    if (s.left !== null) pages.push(s.left);
+    if (s.right !== null) pages.push(s.right);
+  }
+  return [...new Set(pages)].filter((p) => p >= 0 && p < total).sort((a, b) => a - b);
+}
+
 /** Trang đọc ĐẦU TIÊN của 1 spread (luôn có). */
 function firstReadPage(
   sides: { left: number | null; right: number | null },

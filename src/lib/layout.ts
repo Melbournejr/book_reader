@@ -135,7 +135,7 @@ export function spreadVisualRect(
  * - `grab`: góc ngoài-dưới của cell — điểm nắm khi lật có hiệu ứng;
  * - `mirror`: điểm nắm phản chiếu qua gáy — điểm đáp khi lật xong.
  * Đường lật có hiệu ứng đi theo cung quadBezier(grab → mirror) với
- * điểm điều khiển ở giữa, cao lên h*0.22 (góc giấy quét qua gáy).
+ * điểm điều khiển ở giữa, nhấc nhẹ lên trên (góc giấy quét qua gáy).
  */
 export function curlAnchors(
   cellX: number,
@@ -149,7 +149,18 @@ export function curlAnchors(
   return { spineX, grab, mirror };
 }
 
-/** Điểm điều khiển cho cung lật grab → mirror (quét qua gáy). */
+/**
+ * Điểm điều khiển cho cung lật grab → mirror (quét qua gáy).
+ * v0.3.10: y = 0.8h (cung DẸT — góc giấy chỉ nhấc ~10% chiều cao) thay
+ * cho 0.22h của bản web. Nếp gấp là đường trung trực của grab→point nên
+ * cung càng cao thì nếp càng chéo: với 0.22h nếp nghiêng tới ~47° so
+ * với phương thẳng đứng (đo bằng Node, xem test v0310), trên video lá
+ * trông như bị xoắn chứ không quét ngang như lật giấy thật; với 0.8h
+ * nếp chỉ nghiêng tối đa ~15°, quét ngang trang, góc vẫn nhấc rõ
+ * (60px trên trang 600px) nên không thành tấm trượt phẳng. Bản web
+ * giữ 0.22h — desktop đổi có chủ ý vì trên màn hình lớn/full màn độ
+ * chéo lộ rõ hơn.
+ */
 export function curlArcControl(grab: Pt, mirror: Pt, height: number): Pt {
-  return { x: (grab.x + mirror.x) / 2, y: height * 0.22 };
+  return { x: (grab.x + mirror.x) / 2, y: height * 0.8 };
 }
