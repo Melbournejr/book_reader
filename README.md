@@ -196,6 +196,105 @@ không có đọc manga phải → trái. Bản này sửa cả 3 + làm lại g
   không, lật còn ngược không (nhất là truyện ảnh CBZ), manga lật đúng
   chiều + đúng trang chưa, menu mở/đóng có mượt không.
 
+### v0.3.10 — lật mượt + đúng vật lý giấy thật: easing chữ S, cung dẹt, lookahead (28/11/2026)
+Thiện test v0.3.9: "Đã có hiệu ứng lật trang. Nhưng cần chỉnh thêm mượt
+hơn, không bị nhảy khung hình. Phần lật trang tao cần chuẩn theo hiệu
+ứng vật lý ngoài đời thực. Fix được toàn bộ rồi hãy làm bản mới." Kèm 2
+video (CBZ I Am A Hero, fullscreen + cửa sổ có sidebar).
+
+**Chẩn đoán (đọc code thật + đo số, file:dòng):**
+
+1. **Nhảy khung — easing easeOutQuart sai vật lý giấy.** `startFlip`
+   dùng easeOutQuart 900ms (`src/lib/curl.ts`, `Reader.tsx` v0.3.9):
+   đo thật — 100ms đầu đã đi 34% đường, 180ms đi 59%, 100ms cuối chỉ
+   đi 0.2%. Khớp đúng frame video: t≈3.5s lá mới nhếch góc nhỏ,
+   t≈3.9s (chỉ 0.4s sau) lá đã gập chéo gần hết trang, rồi bò chậm
+   phần còn lại. Giấy thật ngược lại: nhấc chậm, quét nhanh giữa
+   chừng, đáp nhẹ — đường cong chữ S. Bản web dùng cùng easeOutQuart
+   nhưng web decode xong mới lật nên cú bật ít lộ; desktop v0.3.9
+   mount lá ngay + decode nền nên cú bật + hình nền về muộn càng lộ.
+2. **Nếp gấp xoắn chéo — đường lật quét lên cao.** `curlArcControl`
+   (`src/lib/layout.ts:153`) đặt điểm điều khiển ở y = h\*0.22 (gần mép
+   trên, copy y nguyên từ bản web): điểm cầm quét lên cao giữa chừng
+   nên nếp gấp (đường trung trực grab→point) nghiêng chéo. Đo thật
+   trên hình học `foldGeometry` thật: cung cũ nghiêng tối đa **46.7°**;
+   cung dẹt y = h\*0.8 chỉ còn **15.5°** (lúc mount 14.8°), góc giấy
+   vẫn nhấc lên 60px (~10% chiều cao trang) nên không thành tấm trượt
+   phẳng. Đây là điểm bản desktop CHỦ Ý khác bản web — frame video
+   chứng minh cung 0.22h xoắn, và bản web chưa bao giờ được kiểm chứng
+   với giấy thật.
+3. **Giật khung giữa chừng — decode + re-render trong lúc tween.**
+   v0.3.9 `startFlip` vẫn bắn `ensure` + `decodeImages` nền TRONG lúc
+   tween: `ensure` xong tăng `cacheVersion` → re-render cả Reader
+   giữa chừng (CurlLeaf render lại rồi layout effect áp lại live
+   point); `decodeImages` tạo `new Image()` + `img.decode()` cho tới
+   4 trang vài MB; mặt sau lá có thể đang là placeholder "Đang tải
+   trang…" rồi BẬT thành ảnh thật giữa chừng. Mỗi cái là 1 cú giật.
+   `settleDrag` cũng có decode nền khi thả tay.
+4. **Dải mỏng sót (video 2, spread 19–20 đã yên, mép phải còn ô đen
+   số 8 + mảnh trang) — KHÔNG phải lá sót sau khi đáp.** Đối chiếu
+   frame 10fps: f015/f016 là giữa chừng 1 cú lật (lá đang qua spread,
+   mặt sau che gần hết ô phải, nếp gần thẳng đứng), f017 đã đáp sạch.
+   `finishFlip`/`cancelFlip` đã dọn `setCurl(null)` từ v0.3.9, và
+   `jumpTo`/`commitSlider` đã gọi `cancelFlip()`. Lỗi thật vẫn là
+   (1)+(3): tư thế đầu của lá là dải chéo mỏng (cung 0.22h) nên giữa
+   chừng trông như dải trang lạ sót lại.
+
+**Sửa (giữ mô hình curl của bản web ở chỗ đã đúng, chỉ đổi chỗ sai
+vật lý hoặc desktop khác web):**
+
+1. **Easing chữ S:** `easeInOutCubic` mới (`src/lib/curl.ts`) thay
+   easeOutQuart cho lật phím/chạm/nút, vẫn 900ms. Đo thật: 100ms đầu
+   đi 0.4%, 100ms giữa (400–500ms) đi 24%, 100ms cuối đi 0.4% — vận
+   tốc 0 ở cả 2 đầu, nhanh nhất giữa chừng. Drag settle giữ nguyên
+   easeOutCubic (commit) / easeOutQuint (bật lại) — tiếp nối đà tay,
+   không sai vật lý.
+2. **Cung dẹt:** `curlArcControl` y = h\*0.8 (was h\*0.22). Nếp gấp
+   quét gần thẳng đứng như giấy thật; góc giấy vẫn nhấc 60px.
+3. **Mount không snap:** vì chữ S gần như phẳng lúc đầu, mount ở
+   `path(ease(0.03))` sẽ gần trùng điểm nắm (hình học suy biến → lá
+   tàng hình lại). Lá mount ở `path(FLIP_MOUNT_K)` với
+   `FLIP_MOUNT_K = 0.05` (~40px từ điểm nắm, hình học hợp lệ, vẫn đọc
+   là "vừa nhấc"), tween bắt đầu ở `FLIP_MOUNT_T = ∛(0.05/4) = 0.232`
+   (nghịch đảo của easeInOutCubic) nên tween tiếp tục đúng từ tư thế
+   mount, không bật ngược — còn lại ~691ms.
+4. **Lookahead:** effect mới trong `Reader.tsx` — 300ms sau khi spread
+   yên (và chỉ khi không lật), `ensure` + `decodeImages` trước spread
+   kề cả 2 chiều (`lookaheadPages` mới trong `src/lib/spread.ts`).
+   Timeout bị hủy mỗi lần đổi spread nên lật nhanh không tranh việc
+   với tween. Lúc bấm lật, trang đích đã sẵn trong cache + đã giải mã.
+   Nếu lật trước khi lookahead chạy thì lật vẫn chạy ngay như v0.3.9
+   (placeholder thay vì đứng hình).
+5. **Không decode lại trong tween:** `decodeImages` bỏ qua trang đã
+   giải mã rồi (`decodedRef` Set) — với lookahead trúng, việc nền lúc
+   lật là no-op thật (ensure không có job mới nên không tăng
+   cacheVersion, không re-render). Mặt sau lá không bật placeholder→ảnh
+   giữa chừng vì đã có ảnh từ lúc mount.
+6. **Mặt lá đóng băng lúc mount:** `startFlip`/`beginDragFlip` chụp
+   2 mặt lá vào `leafFacesRef` rồi mới `setCurl`; JSX render mặt đã
+   chụp (chỉ fallback sang `renderFace` trực tiếp nếu đường mount nào
+   quên chụp). `finishFlip`/`cancelFlip` dọn ref cùng `setCurl(null)`.
+   Nếu trang đích chưa sẵn lúc mount thì giữ placeholder cho đúng 1 cú
+   lật đó (hiếm khi có lookahead); spread đáp vẫn hiện trang thật.
+
+**KHÔNG đổi:** pairing RTL (vẫn chờ Thiện đồng ý — bước 7 của v0.3.8),
+MOBI lười v0.3.9, API Rust, easing settle của kéo-thả, mô hình spread,
+bản web (web vẫn easeOutQuart + cung 0.22h — khác desktop từ bản này,
+vì frame video chứng minh cung đó xoắn; nếu Thiện thấy web cũng xoắn
+thì mới đổi web theo).
+
+**Chưa kiểm được bằng mắt** (không có WebView trên máy build): cảm
+nhận lật có mượt + đúng giấy thật trên máy Thiện không (đo bằng test:
+easing chữ S, nếp ≤16°, lookahead bao phủ trang đích, tween không
+snap-back, hủy giữa chừng không đáp nhầm — nhưng mắt trên WebView2
+thật mới là cửa cuối), Rust không đổi nên không cần build lại Rust
+(GitHub Actions vẫn là cửa kiểm cuối). Test số: 101 (v030) + 13 (v034)
++ 41 (v037 — test E3 cập nhật theo cung mới 0.8h) + 44 (v038) + 688
+(v039) + 42 mới (v0310: easing cũ tái hiện cú bật 34%/100ms đầu vs
+chữ S, nếp gấp theo thời gian từ `foldGeometry` thật, mount hợp lệ,
+lookahead bao phủ, tween + dọn lá bằng fake rAF) — tất cả pass. File
+test mới: `~/workspace/goals/pc-book-reading-software/hidden_files/v0310-flip-smooth-test.ts`.
+
 ### v0.3.9 — MOBI nạp lười + lá lật hiện thật + lật phản hồi ngay: theo mô hình trình xem video (28/11/2026)
 Thiện test v0.3.8 (sidebar đã ghi v0.3.8): (a) mở Conde koma 1.mobi
 (412MB) thì cả app đơ, kẹt ở toast "Đang mở Conde koma 1.mobi...";
