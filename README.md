@@ -196,6 +196,57 @@ không có đọc manga phải → trái. Bản này sửa cả 3 + làm lại g
   không, lật còn ngược không (nhất là truyện ảnh CBZ), manga lật đúng
   chiều + đúng trang chưa, menu mở/đóng có mượt không.
 
+### v0.3.13 — mặt SAU của trang lật hiện đúng (hết soi gương / hết tàng hình) (28/11/2026)
+Thiện bảo: "không ổn rồi; giờ mày tự chạy phần mềm, tự phân tích lỗi
+đi, xem lỗi như nào báo tao." Mio tự chạy thật: tải Chrome for Testing
+159 về VM, dựng harness (`~/workspace/flip-harness/`, import nguyên
+code thật `CurlLeaf`/`curlGeometry`/`curl`/`layout`/`spread`, 10 trang
+test có số to + lưới + chữ để soi mirror/shear) rồi bấm lật + chụp
+frame giữa lật bằng mắt mình.
+
+**Chẩn đoán (xem ảnh chụp harness, không phải đoán từ code):**
+
+1. **v0.3.12 ĐÃ sửa đúng 2 lỗi cũ** — cuộn quét dọc song song gáy
+   (không chéo) và trang đích hiện dưới lá giữa lật (ảnh mid-book
+   thấy trang 6 cam dưới lá, không nền đen). Tween đúng thời gian
+   (~746–836ms đo được). Gấp chéo khi KÉO góc là đúng vật lý giấy,
+   không phải lỗi.
+2. **LỖI MỚI — mặt SAU không bao giờ hiện.** Ảnh đóng băng p=0.5:
+   nếp cuộn hiện nội dung mặt TRƯỚC bị SOI GƯƠNG (chữ đọc ngược)
+   thay vì mặt sau; ảnh p=0.75: trang đã lật gần như TÀNG HÌNH
+   (thấy trang nền thay vì trang đã lật). Hình học ĐÚNG (probe số
+   học: strip đã lật rộng, đặt đúng chỗ, `faces=back`) — lỗi ở
+   RENDER. Cơ chế (`src/components/CurlLeaf.tsx`): `clip-path`
+   (polygon) trên div lát là grouping property, ép
+   `transform-style` của lát thành flat, phá vỡ
+   `backface-visibility` của 2 mặt con — mặt sau (`rotateY(180deg)`)
+   luôn bị ẩn, mặt trước hiện ngược sau 90°. Bằng chứng: xóa hết
+   clip-path lúc chạy thì mặt sau hiện đúng ngay (trang 5 xám, chữ
+   đúng chiều).
+3. **Sửa:** bỏ `clip-path` khỏi lát VÀ khỏi 2 mặt con — chỉ còn
+   `overflow:hidden` của mặt cắt nội dung theo hộp lát. Đã thử dời
+   clip từ lát xuống mặt trước (bundle đã kiểm đúng): ảnh chụp vẫn
+   pixel-identical với bản lỗi, tức clip ở mặt cũng phá. Với lật
+   phím/chạm (kéo ngang) đa giác cắt == hình chữ nhật nên không khác
+   gì; với kéo chéo phần thừa góc nhỏ — đã kiểm bằng mắt ở kéo giữ
+   60%/40%: không thấy tam giác thừa lộ. Không đổi hình học
+   (`curlGeometry.ts`), easing, điểm nắm, hay mô hình spread.
+- **Kiểm bằng mắt trong harness (Chrome thật, sau sửa):** p=0.5 —
+  phần đã lật hiện trang 5 (xám, "MBER 5", "BR-5", chữ đúng chiều),
+  không còn chữ ngược; p=0.75 — trang 5 nằm phẳng bên phải, hiện rõ,
+  không còn tàng hình; kéo giữ 60% (tới) và 40% (lui) — mặt sau đúng,
+  không chữ ngược, nếp gấp chéo theo tay như giấy thật; mid-book
+  p=0.5 (sách 10 trang) — trang đích 6 vẫn hiện dưới lá, nếp cuộn
+  vẫn quét dọc; spread đứng yên + đáp sau lật đều đúng trang.
+  Test: v0312 23/23, v0311 51/51, v0310 42/42, v039 688/688;
+  `tsc -b` + `npm run build` sạch.
+- **Chưa test được ở đây:** không có WebView trên VM — cảm nhận lật
+  trên máy thật của Thiện (file CBZ thật, màn hình thật) mới là cửa
+  cuối: giữa lật mặt sau có hiện đúng trang không, cuối lật trang có
+  đáp phẳng đúng chỗ không. Harness chỉ chứng minh render đúng với
+  trang test; decode ảnh thật qua `mio-page://` + warm cache vẫn do
+  test v0312/v039 bao (không chạy trên file thật ở đây).
+
 ### v0.3.12 — cuộn quét DỌC song song gáy + hết nền đen dưới lá (28/11/2026)
 Thiện test v0.3.11: "Tao chưa hài lòng với hiệu ứng lật này, mày kiểm
 tra lại đi, làm code ngon hơn." Kèm video 28.4s (CBZ I Am A Hero,
